@@ -3,10 +3,14 @@ import { describe, expect, it } from "vitest";
 import {
   APP_ROLES,
   canDeleteRecords,
+  canManageAttendance,
   canManageSettings,
   canManageTeam,
+  canViewFinancials,
+  canViewSettings,
   canWriteAuditLog,
   isAppRole,
+  isSelfServiceAttendance,
   isStaffRole,
 } from "./roles";
 
@@ -30,12 +34,36 @@ describe("roles", () => {
     expect(canManageSettings("developer")).toBe(false);
   });
 
+  it("hides settings and financial totals from staff", () => {
+    expect(canViewSettings("admin")).toBe(true);
+    expect(canViewSettings("developer")).toBe(true);
+    expect(canViewSettings("staff")).toBe(false);
+    expect(canViewSettings("client")).toBe(false);
+
+    expect(canViewFinancials("admin")).toBe(true);
+    expect(canViewFinancials("developer")).toBe(true);
+    expect(canViewFinancials("staff")).toBe(false);
+    expect(canViewFinancials(null)).toBe(false);
+  });
+
   it("keeps deletes and team management narrow", () => {
     expect(canDeleteRecords("admin")).toBe(true);
     expect(canDeleteRecords("developer")).toBe(true);
     expect(canDeleteRecords("staff")).toBe(false);
     expect(canManageTeam("admin")).toBe(true);
     expect(canManageTeam("developer")).toBe(false);
+  });
+
+  it("keeps attendance editing admin/developer and self-service staff", () => {
+    expect(canManageAttendance("admin")).toBe(true);
+    expect(canManageAttendance("developer")).toBe(true);
+    expect(canManageAttendance("staff")).toBe(false);
+    expect(canManageAttendance("client")).toBe(false);
+
+    expect(isSelfServiceAttendance("staff")).toBe(true);
+    expect(isSelfServiceAttendance("admin")).toBe(false);
+    expect(isSelfServiceAttendance("developer")).toBe(false);
+    expect(isSelfServiceAttendance(null)).toBe(false);
   });
 
   it("mirrors activity_logs policy for audit writes", () => {

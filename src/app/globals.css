@@ -114,4 +114,10 @@
     @apply bg-background text-foreground;
     font-family: var(--font-sans);
   }
+  /* Native <select> popups don't inherit the theme in Chromium/Edge — pin tokens. */
+  select option,
+  select optgroup {
+    background-color: var(--popover);
+    color: var(--popover-foreground);
+  }
 }

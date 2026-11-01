@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { PAYMENT_MODES } from "@/lib/data/sale-input";
@@ -97,35 +98,35 @@ export function SaleForm({
         <CardContent className="grid gap-4 px-5 sm:grid-cols-2">
           <div className="grid gap-2 sm:col-span-2">
             <Label htmlFor="client_id">Client *</Label>
-            <Select
+            <SearchableSelect
               id="client_id"
               name="client_id"
               required
               defaultValue={String(initial?.clientId ?? "")}
-            >
-              <option value="">Client chuniye…</option>
-              {options.clients.map((client) => (
-                <option key={client.id} value={client.id}>
-                  {client.name}
-                  {client.contact ? ` · ${client.contact}` : ""}
-                </option>
-              ))}
-            </Select>
+              placeholder="Client chuniye…"
+              options={options.clients.map((client) => ({
+                value: String(client.id),
+                label: client.name,
+                hint: client.contact,
+                keywords: client.contact,
+              }))}
+            />
           </div>
           <div className="grid gap-2">
             <Label htmlFor="mechanic_id">Mechanic</Label>
-            <Select
+            <SearchableSelect
               id="mechanic_id"
               name="mechanic_id"
               defaultValue={String(initial?.mechanicId ?? "")}
-            >
-              <option value="">Unassigned</option>
-              {options.mechanics.map((mechanic) => (
-                <option key={mechanic.id} value={mechanic.id}>
-                  {mechanic.name}
-                </option>
-              ))}
-            </Select>
+              placeholder="Unassigned"
+              options={[
+                { value: "", label: "Unassigned" },
+                ...options.mechanics.map((mechanic) => ({
+                  value: String(mechanic.id),
+                  label: mechanic.name,
+                })),
+              ]}
+            />
           </div>
           <div className="grid gap-2">
             <Label htmlFor="payment_mode">Payment mode *</Label>
@@ -184,12 +185,21 @@ export function SaleForm({
               className="flex flex-wrap items-end gap-2 sm:flex-nowrap"
             >
               <div className="grid w-full min-w-0 gap-2 sm:flex-1">
-                <Label>Product</Label>
-                <Select
+                <Label htmlFor={`sale_product_${row.key}`}>Product</Label>
+                <SearchableSelect
+                  id={`sale_product_${row.key}`}
                   value={row.productId >= 0 ? String(row.productId) : ""}
-                  onChange={(event) => {
-                    const raw = event.target.value;
-                    const productId = raw === "" ? -1 : Number(raw);
+                  placeholder="Select product…"
+                  options={[
+                    { value: "0", label: "Free-text item (price only)" },
+                    ...options.products.map((product) => ({
+                      value: String(product.id),
+                      label: product.name,
+                      hint: formatINR(product.price),
+                    })),
+                  ]}
+                  onChange={(next) => {
+                    const productId = next ? Number(next) : -1;
                     const price = productById.get(productId)?.price ?? 0;
                     setRows((current) =>
                       current.map((item) =>
@@ -203,19 +213,14 @@ export function SaleForm({
                       ),
                     );
                   }}
-                >
-                  <option value="">Select product…</option>
-                  <option value="0">Free-text item (price only)</option>
-                  {options.products.map((product) => (
-                    <option key={product.id} value={product.id}>
-                      {product.name} · {formatINR(product.price)}
-                    </option>
-                  ))}
-                </Select>
+                />
               </div>
               <div className="w-20 shrink-0">
-                <Label className="mb-2">Qty</Label>
+                <Label htmlFor={`sale_qty_${row.key}`} className="mb-2">
+                  Qty
+                </Label>
                 <Input
+                  id={`sale_qty_${row.key}`}
                   type="number"
                   min="1"
                   step="1"
@@ -232,8 +237,11 @@ export function SaleForm({
                 />
               </div>
               <div className="w-28 shrink-0">
-                <Label className="mb-2">Price</Label>
+                <Label htmlFor={`sale_price_${row.key}`} className="mb-2">
+                  Price
+                </Label>
                 <Input
+                  id={`sale_price_${row.key}`}
                   type="number"
                   min="0"
                   step="0.01"

@@ -1,7 +1,9 @@
 import { Wrench } from "lucide-react";
+import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
 import { getSession } from "@/lib/auth";
+import { formatIST } from "@/lib/date";
 
 import { LoginForm } from "./login-form";
 
@@ -13,6 +15,19 @@ export default async function LoginPage({ searchParams }: PageProps<"/login">) {
 
   const params = await searchParams;
   const next = typeof params.next === "string" ? params.next : undefined;
+
+  const cookieStore = await cookies();
+  const lastEmail = cookieStore.get("vtech_last_email")?.value ?? "";
+  const lastLoginAt = cookieStore.get("vtech_last_login")?.value;
+  const lastLoginLabel = lastLoginAt
+    ? formatIST(lastLoginAt, {
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : null;
 
   return (
     <main className="grid min-h-svh lg:grid-cols-2">
@@ -53,7 +68,11 @@ export default async function LoginPage({ searchParams }: PageProps<"/login">) {
             Staff account se login karein.
           </p>
 
-          <LoginForm next={next} />
+          <LoginForm
+            next={next}
+            lastEmail={lastEmail}
+            lastLoginLabel={lastLoginLabel}
+          />
         </div>
       </section>
     </main>

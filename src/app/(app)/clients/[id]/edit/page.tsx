@@ -5,8 +5,6 @@ import { notFound } from "next/navigation";
 import { ClientForm } from "@/components/clients/client-form";
 import { Button } from "@/components/ui/button";
 import { getClientDetail } from "@/lib/data/clients";
-import { resolveClientPhotoUrl } from "@/lib/domain/client";
-import { getPublicEnv } from "@/lib/env";
 
 export const metadata = { title: "Edit client" };
 
@@ -21,7 +19,6 @@ export default async function EditClientPage({
   if (!detail) notFound();
 
   const { client } = detail;
-  const photoUrl = resolveClientPhotoUrl(client.image_path, getPublicEnv().url);
 
   return (
     <div className="mx-auto max-w-3xl space-y-5">
@@ -34,12 +31,10 @@ export default async function EditClientPage({
       <div>
         <h2 className="text-2xl font-semibold tracking-tight">Edit client</h2>
         <p className="text-muted-foreground mt-1 text-sm">
-          Details update karein. Photo replace karne par purani file preserve
-          rehti hai.
+          Details update karein.
         </p>
       </div>
       <ClientForm
-        photoUrl={photoUrl}
         initial={{
           id: client.id,
           firstname: client.firstname,

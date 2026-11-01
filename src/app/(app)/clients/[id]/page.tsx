@@ -14,7 +14,6 @@ import {
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
-import { ClientAvatar } from "@/components/clients/client-avatar";
 import { DeleteClientButton } from "@/components/clients/delete-client-button";
 import { JobStatusBadge } from "@/components/jobs/job-status-badge";
 import { Badge } from "@/components/ui/badge";
@@ -29,12 +28,7 @@ import {
 import { isStaffRole, requireSession } from "@/lib/auth";
 import { getClientDetail } from "@/lib/data/clients";
 import { formatIST } from "@/lib/date";
-import {
-  resolveClientPhotoUrl,
-  telHref,
-  whatsAppHref,
-} from "@/lib/domain/client";
-import { getPublicEnv } from "@/lib/env";
+import { clientInitials, telHref, whatsAppHref } from "@/lib/domain/client";
 import { formatINR } from "@/lib/money";
 import { canDeleteRecords } from "@/lib/roles";
 import { cn } from "@/lib/utils";
@@ -114,7 +108,6 @@ export default async function ClientDetailPage({
 
   const { client, balance, finance, contacts, jobs, payments, sales, loans } =
     detail;
-  const photoUrl = resolveClientPhotoUrl(client.image_path, getPublicEnv().url);
   const tel = telHref(client.contact);
   const whatsapp = whatsAppHref(
     client.contact,
@@ -135,7 +128,12 @@ export default async function ClientDetailPage({
 
       <Card className="gap-0 py-5">
         <CardContent className="flex flex-col gap-4 px-5 sm:flex-row sm:items-start">
-          <ClientAvatar name={client.name} src={photoUrl} size={72} />
+          <span
+            aria-hidden
+            className="bg-primary/10 text-primary grid size-[72px] shrink-0 place-items-center rounded-full text-xl font-semibold"
+          >
+            {clientInitials(client.name)}
+          </span>
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
               <h2 className="text-xl font-semibold tracking-tight">

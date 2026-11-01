@@ -23,9 +23,17 @@ type Tile = {
   tone: string;
 };
 
-export function KpiCards({ stats }: { stats: DashboardStats }) {
-  const tiles: Tile[] = [
-    {
+export function KpiCards({
+  stats,
+  showFinancials,
+}: {
+  stats: DashboardStats;
+  showFinancials: boolean;
+}) {
+  const tiles: Tile[] = [];
+
+  if (showFinancials) {
+    tiles.push({
       label: "Aaj ki kamai",
       value: formatINR(stats.todayRepair + stats.todayDirect, {
         maximumFractionDigits: 0,
@@ -34,7 +42,10 @@ export function KpiCards({ stats }: { stats: DashboardStats }) {
       href: "/sales",
       icon: IndianRupee,
       tone: "bg-success/10 text-success",
-    },
+    });
+  }
+
+  tiles.push(
     {
       label: "In progress",
       value: numberFmt.format(stats.inProgressJobs),
@@ -59,7 +70,7 @@ export function KpiCards({ stats }: { stats: DashboardStats }) {
       icon: Users,
       tone: "bg-warning/10 text-warning",
     },
-  ];
+  );
 
   return (
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">

@@ -1,5 +1,6 @@
 import { Building2, Clock, Database, ShieldCheck, Users } from "lucide-react";
 import Link from "next/link";
+import { redirect } from "next/navigation";
 
 import { SettingsForm } from "@/components/settings/settings-form";
 import { TeamPanel } from "@/components/settings/team-panel";
@@ -15,9 +16,9 @@ import { requireSession } from "@/lib/auth";
 import { getMechanicOptions } from "@/lib/data/jobs";
 import { getSettings, getSystemInfo } from "@/lib/data/settings";
 import { resolveMediaUrl } from "@/lib/data/storage";
-import { listTeamMembers } from "@/lib/data/team";
+import { listMechanicLinks, listTeamMembers } from "@/lib/data/team";
 import { getPublicEnv } from "@/lib/env";
-import { canManageSettings, canManageTeam } from "@/lib/roles";
+import { canManageSettings, canManageTeam, canViewSettings } from "@/lib/roles";
 import { cn } from "@/lib/utils";
 
 export const metadata = { title: "Settings" };
@@ -35,6 +36,8 @@ export default async function SettingsPage({
   searchParams,
 }: PageProps<"/settings">) {
   const session = await requireSession();
+  if (!canViewSettings(session.profile.role)) redirect("/dashboard");
+
   const params = await searchParams;
   const tabParam = typeof params.tab === "string" ? params.tab : "";
   const tab: SettingsTab =
@@ -45,14 +48,16 @@ export default async function SettingsPage({
   const canWriteTab =
     tab === "team" ? canManageTeam(session.profile.role) : canEdit;
 
-  const [settings, systemInfo, teamMembers, mechanics] = await Promise.all([
-    tab === "system" || tab === "team"
-      ? Promise.resolve<Record<string, string>>({})
-      : getSettings(),
-    tab === "system" ? getSystemInfo() : Promise.resolve(null),
-    tab === "team" ? listTeamMembers() : Promise.resolve([]),
-    tab === "team" ? getMechanicOptions() : Promise.resolve([]),
-  ]);
+  const [settings, systemInfo, teamMembers, mechanics, mechanicLinks] =
+    await Promise.all([
+      tab === "system" || tab === "team"
+        ? Promise.resolve<Record<string, string>>({})
+        : getSettings(),
+      tab === "system" ? getSystemInfo() : Promise.resolve(null),
+      tab === "team" ? listTeamMembers() : Promise.resolve([]),
+      tab === "team" ? getMechanicOptions() : Promise.resolve([]),
+      tab === "team" ? listMechanicLinks() : Promise.resolve([]),
+    ]);
 
   const supabaseUrl = getPublicEnv().url;
   const logoUrl = resolveMediaUrl(settings.logo, supabaseUrl);
@@ -165,7 +170,9 @@ export default async function SettingsPage({
         <TeamPanel
           members={teamMembers}
           mechanics={mechanics}
+          mechanicLinks={mechanicLinks}
           canManage={canManageTeam(session.profile.role)}
+          currentUserId={session.userId}
         />
       ) : (
         <SettingsForm

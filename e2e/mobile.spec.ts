@@ -7,7 +7,7 @@ test.use({ viewport: { width: 390, height: 844 } });
 test.describe("mobile layout", () => {
   test.skip(!hasCredentials, "Credentials set nahi hain — mobile check skip.");
 
-  test("attendance aur settings 390px par overflow nahi karte", async ({
+  test("attendance, settings, search aur job form 390px par overflow nahi karte", async ({
     page,
   }) => {
     const problems = watchPageErrors(page);
@@ -18,6 +18,8 @@ test.describe("mobile layout", () => {
       "/attendance?view=month",
       "/settings",
       "/settings?tab=team",
+      "/search?q=ac",
+      "/jobs/new",
     ]) {
       await page.goto(path);
       await expect(page.getByRole("heading", { level: 2 })).toBeVisible();

@@ -14,7 +14,13 @@ import type { RecentJob } from "@/lib/data/dashboard";
 import { formatIST } from "@/lib/date";
 import { formatINR } from "@/lib/money";
 
-export function RecentJobs({ jobs }: { jobs: RecentJob[] }) {
+export function RecentJobs({
+  jobs,
+  showAmounts,
+}: {
+  jobs: RecentJob[];
+  showAmounts: boolean;
+}) {
   return (
     <Card className="gap-4 py-5">
       <CardHeader className="flex-row items-start justify-between gap-2 px-5">
@@ -44,9 +50,11 @@ export function RecentJobs({ jobs }: { jobs: RecentJob[] }) {
                     Client
                   </th>
                   <th className="w-24 px-2 py-2 font-medium sm:px-3">Status</th>
-                  <th className="w-20 px-4 py-2 text-right font-medium sm:w-24 sm:px-5">
-                    Amount
-                  </th>
+                  {showAmounts ? (
+                    <th className="w-20 px-4 py-2 text-right font-medium sm:w-24 sm:px-5">
+                      Amount
+                    </th>
+                  ) : null}
                 </tr>
               </thead>
               <tbody>
@@ -82,9 +90,11 @@ export function RecentJobs({ jobs }: { jobs: RecentJob[] }) {
                         })}
                       </p>
                     </td>
-                    <td className="px-4 py-2.5 text-right font-medium tabular-nums sm:px-5">
-                      {formatINR(job.amount, { maximumFractionDigits: 0 })}
-                    </td>
+                    {showAmounts ? (
+                      <td className="px-4 py-2.5 text-right font-medium tabular-nums sm:px-5">
+                        {formatINR(job.amount, { maximumFractionDigits: 0 })}
+                      </td>
+                    ) : null}
                   </tr>
                 ))}
               </tbody>

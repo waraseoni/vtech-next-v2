@@ -66,117 +66,130 @@ export type DashboardData = {
   attendance: AttendanceStripRow[];
 };
 
-export const getDashboardData = cache(async (): Promise<DashboardData> => {
-  const supabase = await createClient();
-  const today = todayIST();
-  const { start, end } = istDayRange(today);
+export const getDashboardData = cache(
+  async (includeFinancials = true): Promise<DashboardData> => {
+    const supabase = await createClient();
+    const today = todayIST();
+    const { start, end } = istDayRange(today);
 
-  const [
-    statsRes,
-    revenueRes,
-    jobsRes,
-    paymentsRes,
-    attendanceRes,
-    mechanicsRes,
-  ] = await Promise.all([
-    supabase.rpc("get_dashboard_stats", {
-      p_today_start: start,
-      p_today_end: end,
-    }),
-    supabase.rpc("get_monthly_revenue", { p_months: 12 }),
-    supabase
-      .from("transaction_list")
-      .select(
-        "id, job_id, code, client_name, item, fault, amount, status, date_created",
-      )
-      .eq("del_status", 0)
-      .order("date_created", { ascending: false })
-      .limit(8),
-    supabase
-      .from("client_payments")
-      .select("id, client_id, amount, discount, payment_mode, payment_date")
-      .order("created_at", { ascending: false })
-      .limit(6),
-    supabase
-      .from("attendance_list")
-      .select("mechanic_id, status, time_in, time_out")
-      .eq("curr_date", today),
-    supabase
-      .from("mechanic_list")
-      .select("id, firstname, lastname")
-      .eq("delete_flag", 0)
-      .eq("status", 1)
-      .order("firstname"),
-  ]);
+    const [
+      statsRes,
+      revenueRes,
+      jobsRes,
+      paymentsRes,
+      attendanceRes,
+      mechanicsRes,
+    ] = await Promise.all([
+      supabase.rpc("get_dashboard_stats", {
+        p_today_start: start,
+        p_today_end: end,
+      }),
+      includeFinancials
+        ? supabase.rpc("get_monthly_revenue", { p_months: 12 })
+        : Promise.resolve(null),
+      supabase
+        .from("transaction_list")
+        .select(
+          "id, job_id, code, client_name, item, fault, amount, status, date_created",
+        )
+        .eq("del_status", 0)
+        .order("date_created", { ascending: false })
+        .limit(8),
+      includeFinancials
+        ? supabase
+            .from("client_payments")
+            .select(
+              "id, client_id, amount, discount, payment_mode, payment_date",
+            )
+            .order("created_at", { ascending: false })
+            .limit(6)
+        : Promise.resolve(null),
+      supabase
+        .from("attendance_list")
+        .select("mechanic_id, status, time_in, time_out")
+        .eq("curr_date", today),
+      supabase
+        .from("mechanic_list")
+        .select("id, firstname, lastname")
+        .eq("delete_flag", 0)
+        .eq("status", 1)
+        .order("firstname"),
+    ]);
 
-  const stats = parseJson(
-    dashboardStatsSchema,
-    unwrap(statsRes, "dashboard.stats"),
-    "dashboard.stats",
-  );
-  const monthlyRevenue = parseJson(
-    monthlyRevenueSchema,
-    unwrap(revenueRes, "dashboard.revenue"),
-    "dashboard.revenue",
-  );
+    const stats = parseJson(
+      dashboardStatsSchema,
+      unwrap(statsRes, "dashboard.stats"),
+      "dashboard.stats",
+    );
+    const monthlyRevenue = revenueRes
+      ? parseJson(
+          monthlyRevenueSchema,
+          unwrap(revenueRes, "dashboard.revenue"),
+          "dashboard.revenue",
+        )
+      : [];
 
-  const jobRows = unwrap(jobsRes, "dashboard.jobs");
-  const paymentRows = unwrap(paymentsRes, "dashboard.payments");
-  const mechanicRows = unwrap(mechanicsRes, "dashboard.mechanics");
-  const attendanceRows = unwrap(attendanceRes, "dashboard.attendance");
+    const jobRows = unwrap(jobsRes, "dashboard.jobs");
+    const paymentRows = paymentsRes
+      ? unwrap(paymentsRes, "dashboard.payments")
+      : [];
+    const mechanicRows = unwrap(mechanicsRes, "dashboard.mechanics");
+    const attendanceRows = unwrap(attendanceRes, "dashboard.attendance");
 
-  const clientIds = [
-    ...jobRows.map((row) => parseLegacyClientId(row.client_name)),
-    ...paymentRows.map((row) => row.client_id),
-  ].filter((id): id is number => id !== null);
+    const clientIds = [
+      ...jobRows.map((row) => parseLegacyClientId(row.client_name)),
+      ...paymentRows.map((row) => row.client_id),
+    ].filter((id): id is number => id !== null);
 
-  const clientNames = await getClientNames(clientIds);
-  const mechanicNames = new Map(
-    mechanicRows.map((row) => [
-      row.id,
-      `${row.firstname} ${row.lastname}`.trim(),
-    ]),
-  );
-  const attendanceByMechanic = new Map(
-    attendanceRows.map((row) => [row.mechanic_id, row]),
-  );
+    const clientNames = await getClientNames(clientIds);
+    const mechanicNames = new Map(
+      mechanicRows.map((row) => [
+        row.id,
+        `${row.firstname} ${row.lastname}`.trim(),
+      ]),
+    );
+    const attendanceByMechanic = new Map(
+      attendanceRows.map((row) => [row.mechanic_id, row]),
+    );
 
-  return {
-    stats,
-    monthlyRevenue,
-    recentJobs: jobRows.map((row) => {
-      const clientId = parseLegacyClientId(row.client_name);
-      return {
+    return {
+      stats,
+      monthlyRevenue,
+      recentJobs: jobRows.map((row) => {
+        const clientId = parseLegacyClientId(row.client_name);
+        return {
+          id: row.id,
+          jobId: row.job_id,
+          code: row.code,
+          clientName:
+            clientNames.get(clientId ?? -1) ??
+            (clientId ? `Client #${clientId}` : "Walk-in"),
+          item: row.item,
+          fault: row.fault,
+          amount: row.amount,
+          status: row.status,
+          dateCreated: row.date_created,
+        };
+      }),
+      recentPayments: paymentRows.map((row) => ({
         id: row.id,
-        jobId: row.job_id,
-        code: row.code,
         clientName:
-          clientNames.get(clientId ?? -1) ??
-          (clientId ? `Client #${clientId}` : "Walk-in"),
-        item: row.item,
-        fault: row.fault,
+          clientNames.get(row.client_id) ?? `Client #${row.client_id}`,
         amount: row.amount,
-        status: row.status,
-        dateCreated: row.date_created,
-      };
-    }),
-    recentPayments: paymentRows.map((row) => ({
-      id: row.id,
-      clientName: clientNames.get(row.client_id) ?? `Client #${row.client_id}`,
-      amount: row.amount,
-      discount: row.discount ?? 0,
-      paymentMode: row.payment_mode,
-      paymentDate: row.payment_date,
-    })),
-    attendance: mechanicRows.map((mechanic) => {
-      const row = attendanceByMechanic.get(mechanic.id);
-      return {
-        mechanicId: mechanic.id,
-        name: mechanicNames.get(mechanic.id) ?? `#${mechanic.id}`,
-        status: row?.status ?? 0,
-        timeIn: row?.time_in ?? null,
-        timeOut: row?.time_out ?? null,
-      };
-    }),
-  };
-});
+        discount: row.discount ?? 0,
+        paymentMode: row.payment_mode,
+        paymentDate: row.payment_date,
+      })),
+      attendance: mechanicRows.map((mechanic) => {
+        const row = attendanceByMechanic.get(mechanic.id);
+        return {
+          mechanicId: mechanic.id,
+          name: mechanicNames.get(mechanic.id) ?? `#${mechanic.id}`,
+          status: row?.status ?? 0,
+          timeIn: row?.time_in ?? null,
+          timeOut: row?.time_out ?? null,
+        };
+      }),
+    };
+  },
+);

@@ -1,8 +1,7 @@
 "use client";
 
-import Image from "next/image";
 import Link from "next/link";
-import { useActionState, useEffect, useRef, useState } from "react";
+import { useActionState } from "react";
 
 import {
   saveClientAction,
@@ -20,7 +19,6 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { MAX_CLIENT_PHOTO_BYTES, compressPhoto } from "@/lib/images";
 
 export type ClientFormValues = {
   id?: number;
@@ -37,54 +35,11 @@ export type ClientFormValues = {
 
 const initialState: ClientFormState = { error: null };
 
-export function ClientForm({
-  initial,
-  photoUrl,
-}: {
-  initial?: ClientFormValues;
-  photoUrl?: string | null;
-}) {
+export function ClientForm({ initial }: { initial?: ClientFormValues }) {
   const [state, formAction, pending] = useActionState(
     saveClientAction,
     initialState,
   );
-  const [preview, setPreview] = useState<string | null>(photoUrl ?? null);
-  const [photoError, setPhotoError] = useState<string | null>(null);
-  const objectUrl = useRef<string | null>(null);
-
-  useEffect(
-    () => () => {
-      if (objectUrl.current) URL.revokeObjectURL(objectUrl.current);
-    },
-    [],
-  );
-
-  async function handlePhoto(event: React.ChangeEvent<HTMLInputElement>) {
-    const input = event.currentTarget;
-    const file = input.files?.[0];
-    setPhotoError(null);
-    if (!file) return;
-
-    try {
-      const compressed = await compressPhoto(file);
-      if (compressed.size > MAX_CLIENT_PHOTO_BYTES) {
-        throw new Error("Photo 1 MB se choti honi chahiye.");
-      }
-      const transfer = new DataTransfer();
-      transfer.items.add(compressed);
-      input.files = transfer.files;
-
-      if (objectUrl.current) URL.revokeObjectURL(objectUrl.current);
-      const next = URL.createObjectURL(compressed);
-      objectUrl.current = next;
-      setPreview(next);
-    } catch (error) {
-      input.value = "";
-      setPhotoError(
-        error instanceof Error ? error.message : "Photo sahi nahi hai.",
-      );
-    }
-  }
 
   const editing = Boolean(initial?.id);
   const cancelHref = editing ? `/clients/${initial?.id}` : "/clients";
@@ -105,45 +60,9 @@ export function ClientForm({
       <Card className="gap-5 py-5">
         <CardHeader className="px-5">
           <CardTitle>Client details</CardTitle>
-          <CardDescription>
-            Naam, contact aur billing info. Photo optional hai (max 1 MB).
-          </CardDescription>
+          <CardDescription>Naam, contact aur billing info.</CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4 px-5 sm:grid-cols-2">
-          <div className="flex items-center gap-4 sm:col-span-2">
-            <span className="bg-muted grid size-20 shrink-0 place-items-center overflow-hidden rounded-lg border">
-              {preview ? (
-                <Image
-                  src={preview}
-                  alt="Client photo preview"
-                  width={80}
-                  height={80}
-                  unoptimized
-                  className="size-20 object-cover"
-                />
-              ) : (
-                <span className="text-muted-foreground text-xs">No photo</span>
-              )}
-            </span>
-            <div className="space-y-1.5">
-              <Label htmlFor="photo">Photo</Label>
-              <Input
-                id="photo"
-                name="photo"
-                type="file"
-                accept="image/jpeg,image/png,image/webp"
-                onChange={handlePhoto}
-                className="h-auto py-1.5"
-              />
-              <p className="text-muted-foreground text-xs">
-                JPG/PNG/WebP. Badi image browser me compress ho jayegi.
-              </p>
-              {photoError ? (
-                <p className="text-destructive text-xs">{photoError}</p>
-              ) : null}
-            </div>
-          </div>
-
           <div className="grid gap-2">
             <Label htmlFor="firstname">First name *</Label>
             <Input

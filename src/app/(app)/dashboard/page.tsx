@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { requireSession } from "@/lib/auth";
 import { nowIST } from "@/lib/date";
+import { canViewFinancials } from "@/lib/roles";
 
 export const metadata = { title: "Dashboard" };
 
@@ -51,7 +52,9 @@ export default async function DashboardPage() {
       </div>
 
       <Suspense fallback={<DashboardSkeleton />}>
-        <DashboardContent />
+        <DashboardContent
+          includeFinancials={canViewFinancials(session.profile.role)}
+        />
       </Suspense>
     </div>
   );

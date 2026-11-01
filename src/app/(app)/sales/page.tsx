@@ -1,13 +1,17 @@
-import { Plus, ReceiptIndianRupee, Search } from "lucide-react";
+import { Plus, ReceiptIndianRupee } from "lucide-react";
 import Link from "next/link";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { LiveSearchInput } from "@/components/ui/live-search-input";
+import { requireSession } from "@/lib/auth";
 import { getSalesPage } from "@/lib/data/sales";
 import { formatIST } from "@/lib/date";
 import { formatINR } from "@/lib/money";
+import { canViewFinancials } from "@/lib/roles";
+import { cn } from "@/lib/utils";
 
 export const metadata = { title: "Sales" };
 
@@ -39,6 +43,8 @@ function fmtDate(value: string): string {
 }
 
 export default async function SalesPage({ searchParams }: PageProps<"/sales">) {
+  const session = await requireSession();
+  const showFinancials = canViewFinancials(session.profile.role);
   const params = await searchParams;
   const q = typeof params.q === "string" ? params.q.trim() : "";
   const from = typeof params.from === "string" ? params.from : "";
@@ -78,7 +84,7 @@ export default async function SalesPage({ searchParams }: PageProps<"/sales">) {
         </Button>
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-2">
+      <div className={cn("grid gap-3", showFinancials && "sm:grid-cols-2")}>
         <Card className="gap-2 py-4">
           <CardContent className="flex items-center justify-between gap-3 px-4">
             <div>
@@ -94,19 +100,21 @@ export default async function SalesPage({ searchParams }: PageProps<"/sales">) {
             </span>
           </CardContent>
         </Card>
-        <Card className="gap-2 py-4">
-          <CardContent className="flex items-center justify-between gap-3 px-4">
-            <div>
-              <CardDescription>Is page ka total</CardDescription>
-              <p className="mt-1 text-2xl font-semibold tabular-nums">
-                {formatINR(data.pageTotal, { maximumFractionDigits: 0 })}
-              </p>
-            </div>
-            <span className="bg-success/10 text-success grid size-9 place-items-center rounded-lg">
-              <ReceiptIndianRupee className="size-4" aria-hidden />
-            </span>
-          </CardContent>
-        </Card>
+        {showFinancials ? (
+          <Card className="gap-2 py-4">
+            <CardContent className="flex items-center justify-between gap-3 px-4">
+              <div>
+                <CardDescription>Is page ka total</CardDescription>
+                <p className="mt-1 text-2xl font-semibold tabular-nums">
+                  {formatINR(data.pageTotal, { maximumFractionDigits: 0 })}
+                </p>
+              </div>
+              <span className="bg-success/10 text-success grid size-9 place-items-center rounded-lg">
+                <ReceiptIndianRupee className="size-4" aria-hidden />
+              </span>
+            </CardContent>
+          </Card>
+        ) : null}
       </div>
 
       <Card className="gap-0 py-0">
@@ -124,17 +132,11 @@ export default async function SalesPage({ searchParams }: PageProps<"/sales">) {
                 Search
               </label>
               <div className="relative">
-                <Search
-                  className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
-                  aria-hidden
-                />
-                <Input
+                <LiveSearchInput
                   id="sales-q"
-                  name="q"
                   defaultValue={q}
-                  maxLength={60}
                   placeholder="Sale code, client ya remarks"
-                  className="pl-9"
+                  ariaLabel="Search sales"
                 />
               </div>
             </div>

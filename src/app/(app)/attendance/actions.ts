@@ -15,6 +15,7 @@ import { DataError } from "@/lib/data/errors";
 import { isValidDateString } from "@/lib/date";
 import { evaluateGeofence, type LatLng } from "@/lib/domain/geo";
 import { normTime } from "@/lib/domain/duty";
+import { canManageAttendance } from "@/lib/roles";
 
 export type AttendanceActionState = {
   error: string | null;
@@ -49,8 +50,11 @@ export async function saveAttendanceAction(
   formData: FormData,
 ): Promise<AttendanceActionState> {
   const session = await requireSession();
-  if (!isStaffRole(session.profile.role)) {
-    return { error: "Attendance save karne ka access nahi hai." };
+  if (!canManageAttendance(session.profile.role)) {
+    return {
+      error:
+        "Attendance edit sirf admin kar sakta hai. Staff apna check-in/out hi kar sakta hai.",
+    };
   }
 
   const date = String(formData.get("date") ?? "");

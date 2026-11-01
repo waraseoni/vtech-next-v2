@@ -8,23 +8,13 @@ import { recordActivity } from "@/lib/data/audit";
 import { clientInputFromForm } from "@/lib/data/client-input";
 import {
   createClientRecord,
-  removeClientPhoto,
   softDeleteClient,
   updateClientRecord,
-  uploadClientPhoto,
 } from "@/lib/data/clients";
-import { DataError } from "@/lib/data/errors";
 import { canDeleteRecords } from "@/lib/roles";
 
 export type ClientFormState = { error: string | null };
 export type DeleteClientState = { error: string | null };
-
-function friendlyError(error: unknown, fallback: string) {
-  if (error instanceof DataError) {
-    return error.message.replace(/^[\w.]+:\s*/, "");
-  }
-  return fallback;
-}
 
 function parseId(value: FormDataEntryValue | null): number {
   if (typeof value !== "string" || !/^\d+$/.test(value)) return 0;
@@ -49,16 +39,6 @@ export async function saveClientAction(
   }
 
   const id = parseId(formData.get("id"));
-  const photo = formData.get("photo");
-  let uploaded: { url: string; path: string } | null = null;
-
-  if (photo instanceof File && photo.size > 0) {
-    try {
-      uploaded = await uploadClientPhoto(photo);
-    } catch (error) {
-      return { error: friendlyError(error, "Photo upload nahi hua.") };
-    }
-  }
 
   const data = parsed.data;
   const payload = {
@@ -76,20 +56,15 @@ export async function saveClientAction(
   let targetId = id;
   try {
     if (id > 0) {
-      await updateClientRecord(id, {
-        ...payload,
-        ...(uploaded ? { image_path: uploaded.url } : {}),
-      });
+      await updateClientRecord(id, payload);
     } else {
       const created = await createClientRecord({
         ...payload,
-        image_path: uploaded?.url ?? null,
         delete_flag: 0,
       });
       targetId = created.id;
     }
   } catch {
-    if (uploaded) await removeClientPhoto(uploaded.path);
     return { error: "Client save nahi hua. Dobara try karein." };
   }
 

@@ -39,6 +39,7 @@ Required env (see `.env.example`): `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPA
 src/
   app/(auth)/login/     # public sign-in
   app/(app)/            # protected shell (session + role gate)
+  app/(app)/profile/    # account details + self password change
   app/api/health/       # keep-warm endpoint (publishable key only)
   app/api/vitals/       # web-vitals RUM beacon sink
   components/           # shell, providers, ui primitives
@@ -46,7 +47,7 @@ src/
   lib/auth.ts           # cached session + role helpers
   lib/roles.ts          # pure role policy (tested)
   proxy.ts              # auth redirect + per-request nonce CSP
-e2e/                    # Playwright smoke, axe, mobile, gated CRUD
+e2e/                    # Playwright smoke, axe, mobile, profile, gated CRUD
 scripts/                # LHCI auth hook, analyzer wrapper
 ```
 
@@ -56,7 +57,7 @@ Read-only live checks (dev server 3000, credentials from `.env.local`):
 
 ```bash
 npm run check                     # typecheck + lint + unit
-npm run test:e2e                  # smoke (9 routes + axe) + mobile 390px
+npm run test:e2e                  # smoke (10 routes + axe) + mobile + profile
 npm run build && npm run start -- -p 3100
 CHROME_PATH=<chromium>/chrome.exe LHCI_BASE_URL=http://localhost:3100 LHCI_AUTHED=1 npm run test:lhci
 npm run size                      # set PUPPETEER_EXECUTABLE_PATH if estimo flakes

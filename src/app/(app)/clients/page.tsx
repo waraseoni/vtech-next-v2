@@ -3,7 +3,6 @@ import {
   ChevronRight,
   IndianRupee,
   Plus,
-  Search,
   Users,
 } from "lucide-react";
 import Link from "next/link";
@@ -11,7 +10,7 @@ import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
+import { LiveSearchInput } from "@/components/ui/live-search-input";
 import { getClientsPage } from "@/lib/data/clients";
 import { formatIST } from "@/lib/date";
 import { clientInitials } from "@/lib/domain/client";
@@ -132,20 +131,11 @@ export default async function ClientsPage({
             className="flex min-w-0 flex-1 items-center gap-2"
           >
             {dueOnly ? <input type="hidden" name="due" value="1" /> : null}
-            <div className="relative min-w-0 flex-1">
-              <Search
-                className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
-                aria-hidden
-              />
-              <Input
-                name="q"
-                defaultValue={q}
-                maxLength={60}
-                placeholder="Name, phone ya address search karein"
-                aria-label="Search clients"
-                className="pl-9"
-              />
-            </div>
+            <LiveSearchInput
+              defaultValue={q}
+              placeholder="Name, phone ya address search karein"
+              ariaLabel="Search clients"
+            />
             <Button type="submit" variant="secondary">
               Search
             </Button>

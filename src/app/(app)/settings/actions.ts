@@ -8,9 +8,22 @@ import { recordActivity } from "@/lib/data/audit";
 import { DataError } from "@/lib/data/errors";
 import { saveSettings, type SettingsMap } from "@/lib/data/settings";
 import { uploadMediaImage } from "@/lib/data/storage";
-import { createTeamUser } from "@/lib/data/team";
+import {
+  countOtherAdmins,
+  createTeamUser,
+  deleteTeamUser,
+  findMechanicOwner,
+  getTeamMember,
+  resetTeamPassword,
+  updateTeamUser,
+} from "@/lib/data/team";
 import { isValidDuty, normTime } from "@/lib/domain/duty";
-import { canManageSettings, canManageTeam } from "@/lib/roles";
+import {
+  canManageSettings,
+  canManageTeam,
+  isTeamRole,
+  TEAM_ROLES,
+} from "@/lib/roles";
 
 export type SettingsActionState = {
   error: string | null;
@@ -52,6 +65,9 @@ const attendanceSchema = z.object({
 function friendlyError(error: unknown, fallback: string) {
   if (error instanceof DataError) {
     const message = error.message.replace(/^[\w.]+:\s*/, "");
+    if (/profiles_mechanic_id_unique|duplicate key/i.test(message)) {
+      return 'Ye mechanic pehle se kisi user se linked hai — "Mechanic link transfer karein" tick karke dobara save karein.';
+    }
     if (/already|registered|exists/i.test(message)) {
       return "Ye email pehle se registered hai.";
     }
@@ -112,15 +128,52 @@ export async function saveSettingsAction(
 
 const teamSchema = z.object({
   email: z.email("Email sahi nahi hai."),
-  password: z.string().min(8, "Password kam se kam 8 characters ka rakhein."),
+  password: z
+    .string()
+    .min(8, "Password kam se kam 8 characters ka rakhein.")
+    .max(72, "Password 72 characters se chhota rakhein."),
   full_name: z
     .string()
     .trim()
     .min(2, "Full name likhiye.")
     .max(80, "Full name 80 characters se chhota rakhein."),
-  role: z.enum(["admin", "staff", "developer"]),
+  role: z.enum(TEAM_ROLES),
   mechanic_id: z.string().trim(),
 });
+
+const teamUpdateSchema = teamSchema
+  .pick({
+    full_name: true,
+    role: true,
+    mechanic_id: true,
+  })
+  .extend({ user_id: z.uuid("User id sahi nahi hai.") });
+
+const teamPasswordSchema = z.object({
+  user_id: z.uuid("User id sahi nahi hai."),
+  password: teamSchema.shape.password,
+});
+
+const teamDeleteSchema = z.object({
+  user_id: z.uuid("User id sahi nahi hai."),
+});
+
+function parseMechanicId(value: string): number | null {
+  if (!value) return null;
+  const id = Number(value);
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    throw new Error("Mechanic selection sahi nahi hai.");
+  }
+  return id;
+}
+
+async function teamTarget(userId: string) {
+  const target = await getTeamMember(userId);
+  if (!target || !isTeamRole(target.role)) {
+    throw new Error("Ye user team member nahi mila.");
+  }
+  return target;
+}
 
 export async function createUserAction(
   _previous: SettingsActionState,
@@ -140,27 +193,37 @@ export async function createUserAction(
       mechanic_id: String(formData.get("mechanic_id") ?? ""),
     });
 
-    const mechanicId = parsed.mechanic_id ? Number(parsed.mechanic_id) : null;
-    if (
-      mechanicId !== null &&
-      (!Number.isSafeInteger(mechanicId) || mechanicId <= 0)
-    ) {
-      return { error: "Mechanic selection sahi nahi hai." };
+    const mechanicId = parseMechanicId(parsed.mechanic_id);
+    const reassign = String(formData.get("reassign") ?? "") === "1";
+    let owner: Awaited<ReturnType<typeof findMechanicOwner>> = null;
+
+    if (mechanicId !== null) {
+      owner = await findMechanicOwner(mechanicId);
+      if (owner && !reassign) {
+        return {
+          error: `Mechanic #${mechanicId} pehle se ${owner.fullName}${owner.email ? ` (${owner.email})` : ""} se linked hai. Link transfer karna ho to "Mechanic link transfer karein" tick karein.`,
+        };
+      }
     }
 
-    const created = await createTeamUser({
-      email: parsed.email,
-      password: parsed.password,
-      fullName: parsed.full_name,
-      role: parsed.role,
-      mechanicId,
-    });
+    const created = await createTeamUser(
+      {
+        email: parsed.email,
+        password: parsed.password,
+        fullName: parsed.full_name,
+        role: parsed.role,
+        mechanicId,
+      },
+      { reassignFromId: owner?.id ?? null },
+    );
 
     await recordActivity(session, {
       module: "Team",
       action: "create",
       metaId: created.id,
-      details: `${parsed.email} · ${parsed.role}`,
+      details: `${parsed.email} · ${parsed.role}${
+        owner ? ` · mechanic #${mechanicId} transferred` : ""
+      }`,
     });
 
     revalidatePath("/settings");
@@ -170,6 +233,155 @@ export async function createUserAction(
     };
   } catch (error) {
     return { error: friendlyError(error, "User create nahi hua.") };
+  }
+}
+
+export async function updateUserAction(
+  _previous: SettingsActionState,
+  formData: FormData,
+): Promise<SettingsActionState> {
+  const session = await requireSession();
+  if (!canManageTeam(session.profile.role)) {
+    return { error: "User edit karne ka access sirf admin ke paas hai." };
+  }
+
+  try {
+    const parsed = teamUpdateSchema.parse({
+      user_id: String(formData.get("user_id") ?? ""),
+      full_name: String(formData.get("full_name") ?? ""),
+      role: String(formData.get("role") ?? ""),
+      mechanic_id: String(formData.get("mechanic_id") ?? ""),
+    });
+
+    const target = await teamTarget(parsed.user_id);
+
+    if (parsed.user_id === session.userId && parsed.role !== target.role) {
+      return { error: "Apna role khud nahi badal sakte." };
+    }
+
+    if (target.role === "admin" && parsed.role !== "admin") {
+      const others = await countOtherAdmins(parsed.user_id);
+      if (others === 0) {
+        return { error: "Kam se kam ek admin bacha rehna chahiye." };
+      }
+    }
+
+    const mechanicId = parseMechanicId(parsed.mechanic_id);
+    const reassign = String(formData.get("reassign") ?? "") === "1";
+    let owner: Awaited<ReturnType<typeof findMechanicOwner>> = null;
+
+    if (mechanicId !== null) {
+      owner = await findMechanicOwner(mechanicId, parsed.user_id);
+      if (owner && !reassign) {
+        return {
+          error: `Mechanic #${mechanicId} pehle se ${owner.fullName}${owner.email ? ` (${owner.email})` : ""} se linked hai. Link transfer karna ho to "Mechanic link transfer karein" tick karein.`,
+        };
+      }
+    }
+
+    await updateTeamUser(
+      {
+        id: parsed.user_id,
+        fullName: parsed.full_name,
+        role: parsed.role,
+        mechanicId,
+      },
+      { reassignFromId: owner?.id ?? null },
+    );
+
+    await recordActivity(session, {
+      module: "Team",
+      action: "update",
+      metaId: parsed.user_id,
+      details: `${parsed.full_name} · ${parsed.role}${
+        owner ? ` · mechanic #${mechanicId} transferred` : ""
+      }`,
+    });
+
+    revalidatePath("/settings");
+    return { error: null, message: "User details update ho gayin." };
+  } catch (error) {
+    return { error: friendlyError(error, "User update nahi hua.") };
+  }
+}
+
+export async function resetUserPasswordAction(
+  _previous: SettingsActionState,
+  formData: FormData,
+): Promise<SettingsActionState> {
+  const session = await requireSession();
+  if (!canManageTeam(session.profile.role)) {
+    return { error: "Password reset karne ka access sirf admin ke paas hai." };
+  }
+
+  try {
+    const parsed = teamPasswordSchema.parse({
+      user_id: String(formData.get("user_id") ?? ""),
+      password: String(formData.get("password") ?? ""),
+    });
+
+    await teamTarget(parsed.user_id);
+    await resetTeamPassword(parsed.user_id, parsed.password);
+
+    await recordActivity(session, {
+      module: "Team",
+      action: "update",
+      metaId: parsed.user_id,
+      details: "Password reset (admin)",
+    });
+
+    return {
+      error: null,
+      message: "Naya password set ho gaya — user ko alag se share karein.",
+    };
+  } catch (error) {
+    return { error: friendlyError(error, "Password reset nahi hua.") };
+  }
+}
+
+export async function deleteUserAction(
+  _previous: SettingsActionState,
+  formData: FormData,
+): Promise<SettingsActionState> {
+  const session = await requireSession();
+  if (!canManageTeam(session.profile.role)) {
+    return { error: "User delete karne ka access sirf admin ke paas hai." };
+  }
+
+  try {
+    const parsed = teamDeleteSchema.parse({
+      user_id: String(formData.get("user_id") ?? ""),
+    });
+
+    if (parsed.user_id === session.userId) {
+      return { error: "Apna account khud delete nahi kar sakte." };
+    }
+
+    const target = await teamTarget(parsed.user_id);
+
+    if (target.role === "admin") {
+      const others = await countOtherAdmins(parsed.user_id);
+      if (others === 0) {
+        return { error: "Kam se kam ek admin bacha rehna chahiye." };
+      }
+    }
+
+    await deleteTeamUser(parsed.user_id);
+
+    await recordActivity(session, {
+      module: "Team",
+      action: "delete",
+      metaId: parsed.user_id,
+      details: target.email ?? parsed.user_id,
+    });
+
+    revalidatePath("/settings");
+    return {
+      error: null,
+      message: `${target.email ?? "User"} delete ho gaya.`,
+    };
+  } catch (error) {
+    return { error: friendlyError(error, "User delete nahi hua.") };
   }
 }
 

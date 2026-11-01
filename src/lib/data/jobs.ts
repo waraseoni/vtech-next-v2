@@ -87,6 +87,20 @@ export async function getJobsPage(filters: JobFilters = {}): Promise<JobsPage> {
   const pageSize = Math.min(100, Math.max(10, filters.pageSize ?? 50));
   const term = safeSearchTerm(filters.search);
 
+  const clientMatches = term
+    ? unwrap(
+        await supabase
+          .from("client_list")
+          .select("id")
+          .eq("delete_flag", 0)
+          .or(
+            `firstname.ilike.%${term}%,lastname.ilike.%${term}%,contact.ilike.%${term}%`,
+          )
+          .limit(100),
+        "jobs.clientSearch",
+      )
+    : [];
+
   let query = supabase
     .from("transaction_list")
     .select(JOB_COLUMNS, { count: "exact" })
@@ -106,9 +120,18 @@ export async function getJobsPage(filters: JobFilters = {}): Promise<JobsPage> {
     query = query.lte("date_created", istDayRange(filters.to).end);
   }
   if (term) {
-    query = query.or(
-      `job_id.ilike.%${term}%,code.ilike.%${term}%,item.ilike.%${term}%,fault.ilike.%${term}%`,
-    );
+    const parts = [
+      `job_id.ilike.%${term}%`,
+      `code.ilike.%${term}%`,
+      `item.ilike.%${term}%`,
+      `fault.ilike.%${term}%`,
+    ];
+    if (clientMatches.length) {
+      parts.push(
+        `client_name.in.(${clientMatches.map((row) => row.id).join(",")})`,
+      );
+    }
+    query = query.or(parts.join(","));
   }
 
   const start = (page - 1) * pageSize;
@@ -412,6 +435,21 @@ export async function getMechanicOptions() {
       .order("firstname"),
     "jobs.optionMechanics",
   );
+}
+
+export async function getMechanicName(
+  id: number | null,
+): Promise<string | null> {
+  if (!id) return null;
+  const supabase = await createClient();
+  const result = await supabase
+    .from("mechanic_list")
+    .select("firstname, lastname")
+    .eq("id", id)
+    .maybeSingle();
+  assertOk(result, "jobs.mechanicName");
+  const row = result.data;
+  return row ? `${row.firstname} ${row.lastname}`.trim() : null;
 }
 
 export async function getJobFormOptions() {

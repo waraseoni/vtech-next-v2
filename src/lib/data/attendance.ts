@@ -1,7 +1,7 @@
 import "server-only";
 
 import { assertOk, unwrap } from "@/lib/data/errors";
-import { istMonthRange, nowISTTime, todayIST } from "@/lib/date";
+import { istMonthDays, nowISTTime, todayIST } from "@/lib/date";
 import {
   CLEAR_DERIVED_COLS,
   computeDay,
@@ -68,8 +68,9 @@ export type AttendanceUpsertInput = {
 
 export async function getAttendanceDay(
   dateStr: string,
+  mechanicId?: number | null,
 ): Promise<AttendanceDayRow[]> {
-  const context = await loadAttendanceContext(dateStr);
+  const context = await loadAttendanceContext(dateStr, mechanicId);
   const rowsByMechanic = new Map(
     context.attendance.map((row) => [row.mechanic_id, row]),
   );
@@ -112,21 +113,29 @@ export async function getAttendanceDay(
 
 export async function getAttendanceMonth(
   monthStr: string,
+  mechanicId?: number | null,
 ): Promise<AttendanceMonthMechanic[]> {
-  const { start, end } = istMonthRange(monthStr);
-  const [mechanics, attendance, dutyContext] = await Promise.all([
-    getActiveMechanics(),
-    createClient().then((supabase) =>
-      supabase
-        .from("attendance_list")
-        .select(
-          "id, mechanic_id, status, curr_date, time_in, time_out, worked_min, ot_min",
-        )
-        .gte("curr_date", start.slice(0, 10))
-        .lte("curr_date", end.slice(0, 10))
-        .order("curr_date"),
-    ),
-    loadDutyContext(end.slice(0, 10)),
+  const { first, last } = istMonthDays(monthStr);
+  const supabase = await createClient();
+  const allMechanics = await getActiveMechanics();
+  const mechanics =
+    typeof mechanicId === "number"
+      ? allMechanics.filter((mechanic) => mechanic.id === mechanicId)
+      : allMechanics;
+  const ids = mechanics.map((mechanic) => mechanic.id);
+  if (!ids.length) return [];
+
+  const [attendance, dutyContext] = await Promise.all([
+    supabase
+      .from("attendance_list")
+      .select(
+        "id, mechanic_id, status, curr_date, time_in, time_out, worked_min, ot_min",
+      )
+      .gte("curr_date", first)
+      .lte("curr_date", last)
+      .in("mechanic_id", ids)
+      .order("curr_date"),
+    loadDutyContext(last, ids),
   ]);
   const rows = unwrap(attendance, "attendance.month");
 
@@ -431,18 +440,30 @@ async function getActiveMechanics() {
   );
 }
 
-async function loadAttendanceContext(dateStr: string) {
+async function loadAttendanceContext(
+  dateStr: string,
+  mechanicId?: number | null,
+) {
   const supabase = await createClient();
-  const mechanics = await getActiveMechanics();
+  const allMechanics = await getActiveMechanics();
+  const mechanics =
+    typeof mechanicId === "number"
+      ? allMechanics.filter((mechanic) => mechanic.id === mechanicId)
+      : allMechanics;
   const ids = mechanics.map((mechanic) => mechanic.id);
 
+  let attendanceQuery = supabase
+    .from("attendance_list")
+    .select(
+      "id, mechanic_id, status, curr_date, time_in, time_out, lat_in, lng_in, lat_out, lng_out",
+    )
+    .eq("curr_date", dateStr);
+  if (typeof mechanicId === "number") {
+    attendanceQuery = attendanceQuery.eq("mechanic_id", mechanicId);
+  }
+
   const [attendanceRes, dutyContext] = await Promise.all([
-    supabase
-      .from("attendance_list")
-      .select(
-        "id, mechanic_id, status, curr_date, time_in, time_out, lat_in, lng_in, lat_out, lng_out",
-      )
-      .eq("curr_date", dateStr),
+    attendanceQuery,
     loadDutyContext(dateStr, ids),
   ]);
 

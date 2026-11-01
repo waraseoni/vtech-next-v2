@@ -17,7 +17,7 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Select } from "@/components/ui/select";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Textarea } from "@/components/ui/textarea";
 import { MAX_CLIENT_PHOTO_BYTES, compressPhoto } from "@/lib/images";
 import { formatINR, lineTotal, roundMoney } from "@/lib/money";
@@ -157,7 +157,7 @@ export function JobForm({
   const productPayload = productRows
     .filter((row) => (row.productId > 0 || row.name.trim()) && row.qty > 0)
     .map((row) => ({
-      productId: row.productId,
+      productId: Math.max(row.productId, 0),
       name:
         productById.get(row.productId)?.name ??
         row.name.trim() ??
@@ -206,35 +206,35 @@ export function JobForm({
         <CardContent className="grid gap-4 px-5 sm:grid-cols-2">
           <div className="grid gap-2 sm:col-span-2">
             <Label htmlFor="client_id">Client *</Label>
-            <Select
+            <SearchableSelect
               id="client_id"
               name="client_id"
               required
               defaultValue={String(initial?.clientId ?? "")}
-            >
-              <option value="">Client chuniye…</option>
-              {options.clients.map((client) => (
-                <option key={client.id} value={client.id}>
-                  {client.name}
-                  {client.contact ? ` · ${client.contact}` : ""}
-                </option>
-              ))}
-            </Select>
+              placeholder="Client chuniye…"
+              options={options.clients.map((client) => ({
+                value: String(client.id),
+                label: client.name,
+                hint: client.contact,
+                keywords: client.contact,
+              }))}
+            />
           </div>
           <div className="grid gap-2">
             <Label htmlFor="mechanic_id">Mechanic</Label>
-            <Select
+            <SearchableSelect
               id="mechanic_id"
               name="mechanic_id"
               defaultValue={String(initial?.mechanicId ?? "")}
-            >
-              <option value="">Unassigned</option>
-              {options.mechanics.map((mechanic) => (
-                <option key={mechanic.id} value={mechanic.id}>
-                  {mechanic.name}
-                </option>
-              ))}
-            </Select>
+              placeholder="Unassigned"
+              options={[
+                { value: "", label: "Unassigned" },
+                ...options.mechanics.map((mechanic) => ({
+                  value: String(mechanic.id),
+                  label: mechanic.name,
+                })),
+              ]}
+            />
           </div>
           <div className="grid gap-2">
             <Label htmlFor="spot">Spot / tag</Label>
@@ -324,11 +324,18 @@ export function JobForm({
           {serviceRows.map((row) => (
             <div key={row.key} className="flex items-end gap-2">
               <div className="grid min-w-0 flex-1 gap-2">
-                <Label>Service</Label>
-                <Select
-                  value={row.serviceId || ""}
-                  onChange={(event) => {
-                    const serviceId = Number(event.target.value);
+                <Label htmlFor={`service_${row.key}`}>Service</Label>
+                <SearchableSelect
+                  id={`service_${row.key}`}
+                  value={row.serviceId ? String(row.serviceId) : ""}
+                  placeholder="Select service…"
+                  options={options.services.map((service) => ({
+                    value: String(service.id),
+                    label: service.name,
+                    hint: formatINR(service.price),
+                  }))}
+                  onChange={(next) => {
+                    const serviceId = next ? Number(next) : 0;
                     const price = serviceById.get(serviceId)?.price ?? 0;
                     setServiceRows((rows) =>
                       rows.map((item) =>
@@ -338,18 +345,14 @@ export function JobForm({
                       ),
                     );
                   }}
-                >
-                  <option value="">Select service…</option>
-                  {options.services.map((service) => (
-                    <option key={service.id} value={service.id}>
-                      {service.name} · {formatINR(service.price)}
-                    </option>
-                  ))}
-                </Select>
+                />
               </div>
               <div className="w-28 shrink-0">
-                <Label className="mb-2">Price</Label>
+                <Label htmlFor={`service_price_${row.key}`} className="mb-2">
+                  Price
+                </Label>
                 <Input
+                  id={`service_price_${row.key}`}
                   type="number"
                   min="0"
                   step="0.01"
@@ -396,7 +399,7 @@ export function JobForm({
             onClick={() =>
               setProductRows((rows) => [
                 ...rows,
-                { key: rowKey(), productId: 0, name: "", qty: 1, price: 0 },
+                { key: rowKey(), productId: -1, name: "", qty: 1, price: 0 },
               ])
             }
           >
@@ -416,11 +419,21 @@ export function JobForm({
               className="flex flex-wrap items-end gap-2 sm:flex-nowrap"
             >
               <div className="grid w-full min-w-0 gap-2 sm:flex-1">
-                <Label>Product</Label>
-                <Select
-                  value={row.productId || ""}
-                  onChange={(event) => {
-                    const productId = Number(event.target.value);
+                <Label htmlFor={`product_${row.key}`}>Product</Label>
+                <SearchableSelect
+                  id={`product_${row.key}`}
+                  value={row.productId >= 0 ? String(row.productId) : ""}
+                  placeholder="Select product…"
+                  options={[
+                    { value: "0", label: "Legacy / free text" },
+                    ...options.products.map((product) => ({
+                      value: String(product.id),
+                      label: product.name,
+                      hint: formatINR(product.price),
+                    })),
+                  ]}
+                  onChange={(next) => {
+                    const productId = next === "" ? -1 : Number(next);
                     const product = productById.get(productId);
                     setProductRows((rows) =>
                       rows.map((item) =>
@@ -435,17 +448,10 @@ export function JobForm({
                       ),
                     );
                   }}
-                >
-                  <option value="">Select product…</option>
-                  <option value="0">Legacy / free text</option>
-                  {options.products.map((product) => (
-                    <option key={product.id} value={product.id}>
-                      {product.name} · {formatINR(product.price)}
-                    </option>
-                  ))}
-                </Select>
+                />
                 {row.productId === 0 ? (
                   <Input
+                    aria-label="Legacy item ka naam"
                     value={row.name}
                     placeholder="Item ka naam likhein"
                     maxLength={200}
@@ -462,8 +468,11 @@ export function JobForm({
                 ) : null}
               </div>
               <div className="w-20 shrink-0">
-                <Label className="mb-2">Qty</Label>
+                <Label htmlFor={`product_qty_${row.key}`} className="mb-2">
+                  Qty
+                </Label>
                 <Input
+                  id={`product_qty_${row.key}`}
                   type="number"
                   min="0.01"
                   step="0.01"
@@ -480,8 +489,11 @@ export function JobForm({
                 />
               </div>
               <div className="w-28 shrink-0">
-                <Label className="mb-2">Price</Label>
+                <Label htmlFor={`product_price_${row.key}`} className="mb-2">
+                  Price
+                </Label>
                 <Input
+                  id={`product_price_${row.key}`}
                   type="number"
                   min="0"
                   step="0.01"
@@ -530,15 +542,16 @@ export function JobForm({
             <ImagePlus className="size-4" aria-hidden />
             Images chuniye
           </Label>
-          <Input
-            id="images"
-            name="images"
-            type="file"
-            accept="image/jpeg,image/png,image/webp"
-            multiple
-            onChange={handleImages}
-            className="sr-only"
-          />
+          <div className="sr-only">
+            <Input
+              id="images"
+              name="images"
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              multiple
+              onChange={handleImages}
+            />
+          </div>
           {imageError ? (
             <p className="text-destructive text-xs">{imageError}</p>
           ) : null}

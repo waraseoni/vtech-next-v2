@@ -2,14 +2,17 @@
 
 import {
   CalendarCheck,
+  ChevronDown,
   ClipboardList,
   LayoutDashboard,
   LogOut,
   Menu,
   Moon,
   ReceiptIndianRupee,
+  Search,
   Settings,
   Sun,
+  UserRound,
   Users,
   Wrench,
   X,
@@ -18,9 +21,11 @@ import { useTheme } from "next-themes";
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { canViewSettings } from "@/lib/roles";
 import { cn } from "@/lib/utils";
 
 import { logout } from "@/app/(app)/actions";
@@ -31,7 +36,8 @@ const NAV = [
   { href: "/sales", label: "Sales", icon: ReceiptIndianRupee },
   { href: "/clients", label: "Clients", icon: Users },
   { href: "/attendance", label: "Attendance", icon: CalendarCheck },
-  { href: "/settings", label: "Settings", icon: Settings },
+  { href: "/settings", label: "Settings", icon: Settings, settingsOnly: true },
+  { href: "/profile", label: "Profile", icon: UserRound },
 ] as const;
 
 type AppShellProps = {
@@ -43,14 +49,37 @@ type AppShellProps = {
 export function AppShell({ children, brand, user }: AppShellProps) {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const { resolvedTheme, setTheme } = useTheme();
+  const menuRef = useRef<HTMLDivElement>(null);
 
   const active = NAV.find(
     (item) => pathname === item.href || pathname.startsWith(`${item.href}/`),
   );
+  const showSettings = canViewSettings(user.role);
+  const navItems = NAV.filter(
+    (item) => !("settingsOnly" in item) || showSettings,
+  );
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (menuRef.current?.contains(event.target as Node)) return;
+      setMenuOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [menuOpen]);
 
   return (
-    <div className="bg-background min-h-svh lg:grid lg:grid-cols-[240px_1fr]">
+    <div className="bg-background min-h-svh">
       {open ? (
         <button
           type="button"
@@ -62,7 +91,7 @@ export function AppShell({ children, brand, user }: AppShellProps) {
 
       <aside
         className={cn(
-          "border-sidebar-border bg-sidebar text-sidebar-foreground fixed inset-y-0 left-0 z-50 flex w-60 flex-col border-r transition-transform lg:static lg:translate-x-0 print:hidden",
+          "border-sidebar-border bg-sidebar text-sidebar-foreground fixed inset-y-0 left-0 z-50 flex w-60 flex-col border-r transition-transform lg:translate-x-0 print:hidden",
           open ? "translate-x-0" : "-translate-x-full",
         )}
       >
@@ -99,8 +128,11 @@ export function AppShell({ children, brand, user }: AppShellProps) {
           </Button>
         </div>
 
-        <nav aria-label="Main" className="flex-1 space-y-1 px-2 py-2">
-          {NAV.map((item) => {
+        <nav
+          aria-label="Main"
+          className="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 py-2"
+        >
+          {navItems.map((item) => {
             const isActive =
               pathname === item.href || pathname.startsWith(`${item.href}/`);
             return (
@@ -122,23 +154,9 @@ export function AppShell({ children, brand, user }: AppShellProps) {
             );
           })}
         </nav>
-
-        <div className="border-sidebar-border border-t p-3">
-          <div className="flex items-center gap-3">
-            <span className="bg-primary/10 text-primary grid size-9 shrink-0 place-items-center rounded-full text-sm font-semibold">
-              {user.initials}
-            </span>
-            <div className="min-w-0">
-              <p className="truncate text-sm font-medium">{user.name}</p>
-              <p className="text-muted-foreground truncate text-xs capitalize">
-                {user.role}
-              </p>
-            </div>
-          </div>
-        </div>
       </aside>
 
-      <div className="flex min-w-0 flex-col">
+      <div className="flex min-w-0 flex-col lg:pl-60 print:pl-0">
         <header className="bg-background/85 sticky top-0 z-30 flex h-14 items-center gap-3 border-b px-4 backdrop-blur print:hidden">
           <Button
             type="button"
@@ -151,11 +169,43 @@ export function AppShell({ children, brand, user }: AppShellProps) {
             <Menu className="size-4" />
           </Button>
 
-          <h1 className="text-sm font-semibold">
+          <h1 className="shrink-0 text-sm font-semibold">
             {active?.label ?? `${brand.name} Admin`}
           </h1>
 
-          <div className="ml-auto flex items-center gap-1">
+          <form
+            action="/search"
+            method="get"
+            role="search"
+            className="ml-auto hidden w-full max-w-xs min-w-0 sm:block"
+          >
+            <div className="relative">
+              <Search
+                className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
+                aria-hidden
+              />
+              <Input
+                name="q"
+                maxLength={60}
+                placeholder="Search clients, jobs, sales…"
+                aria-label="Universal search"
+                className="pl-9"
+              />
+            </div>
+          </form>
+
+          <Button
+            asChild
+            variant="ghost"
+            size="icon"
+            className="ml-auto sm:hidden"
+          >
+            <Link href="/search" aria-label="Universal search">
+              <Search className="size-4" aria-hidden />
+            </Link>
+          </Button>
+
+          <div className="flex items-center gap-1">
             <Button
               type="button"
               variant="ghost"
@@ -168,12 +218,65 @@ export function AppShell({ children, brand, user }: AppShellProps) {
               <Sun className="hidden size-4 dark:block" />
               <Moon className="size-4 dark:hidden" />
             </Button>
-            <form action={logout}>
-              <Button type="submit" variant="ghost" size="sm">
-                <LogOut className="size-4" aria-hidden />
-                <span className="hidden sm:inline">Logout</span>
-              </Button>
-            </form>
+
+            <div ref={menuRef} className="relative">
+              <button
+                type="button"
+                aria-haspopup="true"
+                aria-expanded={menuOpen}
+                aria-controls="user-menu"
+                onClick={() => setMenuOpen((current) => !current)}
+                className="hover:bg-accent hover:text-accent-foreground focus-visible:ring-ring/50 flex items-center gap-2 rounded-md p-1.5 outline-none focus-visible:ring-[3px]"
+              >
+                <span className="sr-only">Account menu</span>
+                <span className="bg-primary/10 text-primary grid size-8 shrink-0 place-items-center rounded-full text-xs font-semibold">
+                  {user.initials}
+                </span>
+                <span className="hidden min-w-0 text-left md:block">
+                  <span className="block truncate text-sm font-medium">
+                    {user.name}
+                  </span>
+                  <span className="text-muted-foreground block truncate text-xs capitalize">
+                    {user.role}
+                  </span>
+                </span>
+                <ChevronDown
+                  className="text-muted-foreground hidden size-4 md:block"
+                  aria-hidden
+                />
+              </button>
+
+              {menuOpen ? (
+                <div
+                  id="user-menu"
+                  className="bg-popover text-popover-foreground absolute top-full right-0 z-50 mt-2 w-56 rounded-md border p-1 shadow-md"
+                >
+                  <div className="border-b px-2.5 py-2">
+                    <p className="truncate text-sm font-medium">{user.name}</p>
+                    <p className="text-muted-foreground truncate text-xs capitalize">
+                      {user.role}
+                    </p>
+                  </div>
+                  <Link
+                    href="/profile"
+                    onClick={() => setMenuOpen(false)}
+                    className="hover:bg-accent hover:text-accent-foreground flex items-center gap-2 rounded-sm px-2.5 py-2 text-sm"
+                  >
+                    <UserRound className="size-4" aria-hidden />
+                    My profile
+                  </Link>
+                  <form action={logout}>
+                    <button
+                      type="submit"
+                      className="hover:bg-accent hover:text-accent-foreground flex w-full items-center gap-2 rounded-sm px-2.5 py-2 text-sm"
+                    >
+                      <LogOut className="size-4" aria-hidden />
+                      Logout
+                    </button>
+                  </form>
+                </div>
+              ) : null}
+            </div>
           </div>
         </header>
 

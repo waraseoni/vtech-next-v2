@@ -2,7 +2,7 @@ import "server-only";
 
 import { cache } from "react";
 
-import { DataError, unwrap, unwrapMaybe } from "@/lib/data/errors";
+import { unwrap, unwrapMaybe } from "@/lib/data/errors";
 import { clientFinancialsSchema, parseJson } from "@/lib/data/schemas";
 import { createClient } from "@/lib/supabase/server";
 import {
@@ -39,7 +39,7 @@ export type ClientFilters = {
 };
 
 const CLIENT_COLUMNS =
-  "id, firstname, middlename, lastname, contact, email, address, image_path, opening_balance, delete_flag, date_created, date_updated, payment_due_date, payment_due_remarks";
+  "id, firstname, middlename, lastname, contact, email, address, opening_balance, delete_flag, date_created, date_updated, payment_due_date, payment_due_remarks";
 
 function safeSearchTerm(value: string | undefined): string {
   return (value ?? "")
@@ -248,53 +248,4 @@ export async function updateClientRecord(
 
 export async function softDeleteClient(id: number) {
   return updateClientRecord(id, { delete_flag: 1 });
-}
-
-export const CLIENT_PHOTO_BUCKET = "media";
-export const MAX_CLIENT_PHOTO_BYTES = 1024 * 1024;
-
-const PHOTO_EXTENSIONS: Record<string, string> = {
-  "image/jpeg": "jpg",
-  "image/png": "png",
-  "image/webp": "webp",
-};
-
-/**
- * `client-photos` bucket has no insert policy in the shared schema, while
- * `media` already allows staff writes. Zero-DDL par media hi use karte hain.
- */
-export async function uploadClientPhoto(
-  file: File,
-): Promise<{ url: string; path: string }> {
-  const extension = PHOTO_EXTENSIONS[file.type];
-  if (!extension) {
-    throw new DataError(
-      "clients.photo",
-      "Sirf JPG, PNG ya WebP photo chalein.",
-    );
-  }
-  if (file.size > MAX_CLIENT_PHOTO_BYTES) {
-    throw new DataError("clients.photo", "Photo 1 MB se choti honi chahiye.");
-  }
-
-  const supabase = await createClient();
-  const path = `clients/${Date.now()}-${crypto.randomUUID()}.${extension}`;
-  const { error } = await supabase.storage
-    .from(CLIENT_PHOTO_BUCKET)
-    .upload(path, file, {
-      contentType: file.type,
-      cacheControl: "31536000",
-      upsert: false,
-    });
-  if (error) throw new DataError("clients.photo", error.message);
-
-  const { data } = supabase.storage
-    .from(CLIENT_PHOTO_BUCKET)
-    .getPublicUrl(path);
-  return { url: data.publicUrl, path };
-}
-
-export async function removeClientPhoto(path: string) {
-  const supabase = await createClient();
-  await supabase.storage.from(CLIENT_PHOTO_BUCKET).remove([path]);
 }

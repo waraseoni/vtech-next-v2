@@ -50,7 +50,7 @@
 2. **Dashboard** — KPIs, 12-month revenue, job status, recent jobs/payments, low stock, today's attendance
 3. **System settings / System info** — business profile (KV `system_info`), geofence config, read-only system diagnostics
 4. **Attendance** — daily marking + staff self check-in/out (geofence), monthly report + salary hours
-5. **Clients** — list/search/financials, detail, add/edit, photo
+5. **Clients** — list/search/financials, detail, add/edit
 6. **Sales** (= Direct Sales) — list, create/edit with items, detail
 7. **Jobsheet** (= repair jobs / `transaction_list`) — list/search/filter, create/edit, status flow, products/services, job images
 
@@ -225,7 +225,7 @@ Note: low-stock aur receivables widgets deferred (`2b`) — warm load aur round-
 | `typecheck` / `lint` / `test` / `build` | ✅ pass — **41 tests**, 12 routes |
 
 Honest notes:
-1. **Photo bucket:** naye photos public **`media`** bucket me jaate hain (`clients/{ts}-{uuid}.webp`, `Cache-Control: 1 year`), kyunki `client-photos` par staff INSERT policy nahi hai — policy add karna DB change hota. Legacy `client-photos` paths read-only resolve hote hain.
+1. **Photo bucket:** client photo upload feature 2026-11-01 ko hata diya gaya (§6.5). Us waqt naye photos public **`media`** bucket me jaate the (`clients/{ts}-{uuid}.webp`, `Cache-Control: 1 year`), kyunki `client-photos` par staff INSERT policy nahi thi — policy add karna DB change hota. Legacy `client-photos` files untouched hain.
 2. **Contacts** detail page par read-only hain (v1); create/edit UI sirf primary client fields manage karta hai.
 3. **Mutations live DB par submit nahi kiye gaye** — shared production data safety ke liye. Create/update/delete code paths unit-tested + build-verified hain; pehla real client tab banega jab aap kahenge.
 4. Pagination page size doc me 50 tha, implementation me **25** (mobile-first, screenshot-verified).
@@ -280,6 +280,23 @@ Honest notes:
 2. Weekly-off/holiday calendar DB me nahi hai — salary = daily salary × (present + half ÷ 2).
 3. Admin ki manual save **auto-derived columns** (worked/OT/auto-close) compute karke likhti hai; previous open days ka auto-close self check-in par chalta hai.
 4. **Mutations live DB par submit nahi kiye gaye.**
+
+**Attendance month-view fixes (2026-11-01, zero DDL, reads only):**
+
+| Check | Result |
+| --- | --- |
+| Month range | ✅ `istMonthDays` first–last day; October query poore 31 din (pehle sirf last day aata tha); `getAttendanceMonth` active mechanics + optional `mechanic_id` scope |
+| Calendar data | ✅ 2026-10 grid me multiple dates par P/H/A dots + initials render (live read) |
+| Inline edit | ✅ admin day cell click → `?view=month&month=…&date=…`, selected highlight + `AttendanceDayForm` same page par (save gated by `saveAttendanceAction`) |
+| Staff month view | ✅ Monthly toggle sabhi staff roles ko; staff query `mechanic_id` scoped, calendar cells non-clickable, "view only" note |
+| Day/month nav | ✅ prev/next + date/month picker URL change karte hain; uncontrolled inputs `key` se reset hote hain (stale value fix), form state bhi date key se remount |
+| Dark select options | ✅ native `<option>/<optgroup>` popover tokens (`--popover`/`--popover-foreground`) + inherited `color-scheme: dark` |
+| `typecheck` / `lint` / `test` | ✅ pass — **61 tests / 12 files**; smoke + mobile Playwright ✅ |
+
+Honest notes:
+1. Staff month view read-only hai (calendar cells link nahi); staff ke liye edit form kabhi render nahi hota.
+2. Live verification admin login se kiya gaya; staff login ke credentials `.env.local` me nahi hain, isliye staff screen code path + role helpers/tests se verify hua.
+3. **Koi DB write/migration nahi** — sirf reads aur UI/date-helper changes.
 
 **Phase 7 Settings verification (2026-11-01, zero DDL, reads only):**
 
@@ -556,7 +573,7 @@ Sirf tab jab `pg_stat_statements`/profiling bottleneck dikhaye, aur old app idle
 - `proxy.ts`: static/asset/public early-return **before** Supabase client; protected par `getClaims()`; expired par refresh fallback. `getUser()` har request par **kabhi nahi**.
 - `src/proxy.ts` matcher: `/((?!_next/static|_next/image|favicon.ico|.*\\..*).*)`.
 - `(app)/layout.tsx`: `React.cache` session+profile; no profile row → access denied screen (fail-closed).
-- Sidebar: Dashboard, Jobsheet, Sales, Clients, Attendance, Settings. Role-wise visibility (staff: no Settings write; client role: Phase 2).
+- Sidebar: Dashboard, Jobsheet, Sales, Clients, Attendance, Profile; Settings sirf admin/developer ko. Staff ke liye Settings nav me nahi aata aur direct URL `/dashboard` par redirect hota hai (`canViewSettings`). Client role: Phase 2.
 - Logout server action. Session cookie `httpOnly`, sameSite=lax.
 - User creation: admin-only server action (`admin` client + `profiles` explicit insert) — no public signup.
 
@@ -568,6 +585,7 @@ Sirf tab jab `pg_stat_statements`/profiling bottleneck dikhaye, aur old app idle
 - UI: 4 KPI cards (today revenue, in-progress, completed, clients/mechanics), 12-month revenue bars, job-status mix, today's attendance strip, recent jobs table (8), recent payments (6), greeting + IST date, quick actions.
 - Low stock + receivables widgets `2b` me — abhi ke liye deferred, kyunki inventory RPC poora catalog scan karta hai aur receivables `get_clients_page_financials` par depend karta hai; dashboard ki warm load fast rakhne ke liye.
 - Charts: custom SVG/CSS; **recharts bundle nahi**.
+- Staff variant (`canViewFinancials` false): "Aaj ki kamai" KPI, 12-month revenue chart, payments panel aur recent-jobs amount column **nahi** render hote; revenue/payments queries bhi skip hoti hain. Sirf operational counts + attendance dikhte hain.
 - States: single `<Suspense>` skeleton (KPI shell pehle paint), per-widget empty states.
 - Responsive: mobile par chart last 6 months dikhata hai; jobs table `table-fixed` (no page overflow); 390px par verified.
 - **Acceptance:** warm load < 1.8s LCP, ≤ 2 **sequential** round-trips (parallel queries free), route JS < 210KB gzip.
@@ -585,13 +603,14 @@ Tabs:
 - Uploads: logo/cover → `media` bucket, client-side compress (≤1MB, WebP/JPEG), `next/image` se render.
 - Never render or send `ai_api_key`, `csrf_token`.
 
-**Acceptance:** save → 1 RPC, cache invalidated, sidebar name/logo turant update; staff write UI hidden + server rejected.
+**Acceptance:** save → 1 RPC, cache invalidated, sidebar name/logo turant update; staff ke liye poora module hidden (nav + route redirect) aur writes server par rejected.
 
 ### 6.4 Attendance (`/attendance`)
 
 - **Daily tab:** date picker (IST), active mechanics (`mechanic_list.delete_flag=0`, `status=1`), status buttons 1/2/3 + unmarked, `time_in/time_out`, worked hours/OT (derived), geofence badge.
+- **Role rules (UI + server action):** admin/developer kisi bhi date ki attendance edit kar sakte hain (past included). Staff (`isSelfServiceAttendance`) day view me sirf aaj ka din dekhta hai — data query `mechanic_id` se scoped, times read-only, aur edit form sirf `canManageAttendance` par render hota hai. Staff ka check-in/out server timestamp (`nowISTTime`) se hota hai, client time nahi bhej sakta; `saveAttendanceAction` staff ke liye rejected.
 - **Staff self check-in/out:** browser geolocation → geofence config; distance + lat/lng audit columns; denied location → friendly error. Admin "Mark all present" bulk.
-- **Monthly tab:** per-mechanic matrix + totals (present/half/absent, worked hours, OT, salary earned using `mechanic_list.daily_salary`).
+- **Monthly tab (all staff roles):** calendar-style month grid (Sun–Sat), har din cell me mechanics ke status dots + initials, today highlight. Month query poore mahine ka date range cover karta hai (`istMonthDays`), aur staff ke liye `mechanic_id` scoped + read-only hota hai (calendar cells non-clickable). Admin/developer ke liye day cell click → usi page par daily edit form (selected day highlight), niche per-mechanic summary (present/half/absent, worked hours, OT, salary earned using `mechanic_list.daily_salary`). Salary sirf `canViewFinancials` par.
 - Rules (purane tested libs reuse): status 1 present, 2 absent, 3 half-day; no checkout + past duty end → effective out = duty end (auto-closed, 0 OT); <6h = half-day; duty from `staff_duty_schedule` else `biz_open/biz_close` else 10:00–20:00, overnight supported, 15-min grace.
 - Writes: PostgREST upsert on unique `(mechanic_id, curr_date)` (bulk); derived cols server-side.
 - **Acceptance:** day view 1 query; month view 1 date-range query; duplicate row impossible (unique constraint); reload par marked state correct.
@@ -600,10 +619,11 @@ Tabs:
 
 - List: server pagination (25), search by name/contact/email/address (`q`), due-only toggle, columns: name, contact, total billed, paid, **due**, advance/last txn; mobile pe card layout.
 - Financial formula: `billed = opening_balance + repair(status=5) + direct_sales`; `paid = Σ(client_payments.amount + discount)`; `due = billed − paid`; loans alag (`active_loan_given`, `loan_repaid`). Sab kuch `get_clients_page_financials` RPC se — client JS me aggregation nahi.
-- Detail `/clients/[id]`: profile/photo, KPIs, jobs list, direct sales, payments (read-only, net + discount), loans (read-only), contacts (read-only), WhatsApp/tel links.
+- Detail `/clients/[id]`: profile (initials avatar), KPIs, jobs list, direct sales, payments (read-only, net + discount), loans (read-only), contacts (read-only), WhatsApp/tel links.
 - Add/edit: `client_list` insert/update (existing `client_list_id_seq`); zod validation; empty strings → null; `delete_flag=1` soft delete (admin/developer only, confirm dialog).
-- Photo upload → public **`media`** bucket (`clients/{ts}-{uuid}.webp`) + `image_path`; browser canvas compression (max 1200px, WebP q0.82, ≤1 MB); legacy `client-photos` paths read-only resolve.
+- Staff variant: client list ka billed/paid/due aur "Total due" card, detail ka due badge, payments ledger, financials breakdown aur loans **staff ko bhi dikhte hain** (due follow-up ke liye zaroori). Company-wide totals (dashboard revenue, sales page total, attendance salary) staff se hidden rehte hain.
 - **Acceptance:** list warm load fast; due numbers RPC se; detail 2 round-trips max.
+- **Client photo removed (2026-11-01):** add/edit form se photo upload option hata diya; detail page initials avatar dikhata hai. `client_list.image_path` column shared DB me untouched hai (zero-DDL), aur pehle se uploaded files delete nahi ki gayi.
 
 ### 6.6 Sales (`/sales`, direct sales)
 
@@ -623,6 +643,13 @@ Tabs:
 - Detail: full job card, items, images, client link, status timeline, print-friendly layout (print CSS; PDF/print module baad me).
 - `user_id` = session profile → `mechanic_id` fallback 0.
 - **Acceptance:** create 3 writes (`next_job_id` claim → header insert → items insert); no duplicate `job_id` (atomic counter); 2,229 jobs list < 200ms; edit items consistent with verify/retry.
+
+### 6.8 Profile (`/profile`)
+
+- Sabhi team roles ke liye: name, email, role, mechanic link, account created, last sign-in (Supabase Auth user se).
+- Self password change: purana password throwaway client se verify, phir cookie-bound `updateUser`; naya password 8–72 chars; optional "baaki devices sign out" (`signOut({ scope: "others" })`). Best-effort audit (`Team/update`, "Password changed (self)").
+- Shared Supabase login hai, isliye password change dono apps par lagu hota hai — UI me note.
+- **Acceptance:** galat purana password friendly error; success par form reset + message; current session valid rehta hai.
 
 ---
 
@@ -664,6 +691,7 @@ Tabs:
 - **Auth verification:** project par asymmetric signing keys (RS256/ES256) already hain to `getClaims()` JWKS se **locally** verify karega (RTT 0). Ye **DB change nahi**, Supabase Auth setting hai; par shared project par key rotation old app ko affect kar sakta hai, isliye v1 me setting **jaisi hai waisi** rahegi — asymmetric ho to `getClaims()`, warna `getUser()` (1 cached auth call). Keys switch alag approval ke baad.
 - Writes: server action me role check **+** RLS (defence in depth). `profile` absent → fail closed.
 - Settings: **admin only** (server check). Asli DB policy `hardening_sysinfo_staff` admin + staff deti hai aur `developer` ko block karti hai — isliye app gate admin-only rakha (developer ko UI se settings write nahi; DB-level staff write accepted risk, zero-DDL). `ai_*`/`csrf_token` kabhi client ko nahi.
+- **Staff financial visibility (UI-level):** `canViewFinancials` se dashboard revenue, sales page total aur attendance salary hide hote hain. Client-level dues/billed/paid/ledger staff ko visible hain (follow-up ke liye). Ye **security boundary nahi hai** — RLS unchanged (zero-DDL) hone ki wajah se staff apne JWT se Supabase API par wohi tables directly padh sakta hai. Real enforcement ke liye shared DB me policy/view change chahiye (vtech-frontend ke saath coordinate karna hoga).
 - Storage: public read buckets; upload/delete policies already `is_frontend_staff()`.
 - Input validation: zod at boundary; SQL RPCs parameterized (injection-safe).
 - Headers: CSP, `X-Frame-Options`, `Referrer-Policy`, HSTS (Vercel).
@@ -680,7 +708,7 @@ Tabs:
 | **0. Foundation** | git init, Node 24 pin, **exact latest deps (§3.1)**, Next 16 + **React Compiler** + TS 6.0.3 + Tailwind v4 + shadcn, env validation (publishable/secret keys), **existing JWT mode ke hisaab se `getClaims()`/`getUser()`**, Supabase clients, proxy, login, shell, `/api/health`, GitHub Actions (typecheck/lint/test/build + license/audit + keep-warm cron), **bundle analyzer + size-limit**, Dependabot | 2–3 days |
 | **1. Data layer (zero DDL)** | scoped `database.types.ts` (hand-pinned; CLI token ke bina), typed mappers over **existing** RPCs + PostgREST, domain constants, `@date-fns/tz` date utils, Vitest for mappers/attendance rules, read-only live smoke | 2–3 days |
 | **2. Dashboard** | `get_dashboard_stats` + parallel queries + UI + charts + skeletons + perf gate | 3–4 days |
-| **3. Clients** | list/detail/create/edit + financials + photo upload (compress + immutable cache) + e2e | 4–5 days |
+| **3. Clients** | list/detail/create/edit + financials + e2e (photo upload baad me hata diya) | 4–5 days |
 | **4. Jobsheet** | list/create/edit/detail/status/images + 3-write create (`next_job_id` → header → items) + e2e | 5–7 days |
 | **5. Sales** | list/create/edit/detail + `save_direct_sale` + e2e | 3–4 days |
 | **6. Attendance** | daily + self check-in/geofence + monthly + salary hours + `useOptimistic` states + e2e | 4–5 days |
@@ -737,13 +765,13 @@ Tabs:
 
 ## 12. Definition of done (Phase 1)
 
-- [x] 6 modules production build par, role matrix correct (settings admin-only; team creation admin-only; delete admin+developer; audit write admin+staff — DB RLS ke mutabik).
+- [x] 6 modules production build par, role matrix correct (settings admin/developer read + admin write, staff hidden; financial totals admin/developer only; team creation admin-only; delete admin+developer; audit write admin+staff — DB RLS ke mutabik).
 - [x] Authed perf budgets: Lighthouse desktop (prod build) — dashboard 86, jobs 100, clients 100; a11y 99/99/99; size-limit JS 260.4 kB ≤ 320 kB, CSS 7.3 kB ≤ 60 kB.
 - [x] Har page ≤ 2 sequential DB round-trips; koi `select('*')`/waterfall nahi (ESLint ban).
 - [x] Create flows existing objects par: `next_job_id()` + insert, `save_direct_sale` RPC, attendance unique-day upsert; `code`/`sale_code` post-insert verify + retry.
 - [ ] RLS write paths live-tested (staff/developer/admin) — code aur policy review complete; live mutation tests user approval ke bina pending.
 - [x] **Zero DDL verified**: koi migration/table/column/policy/function/index change nahi; sirf read-only queries chali.
-- [x] CI: typecheck + lint + unit (58) + e2e (smoke + axe + mobile) + Lighthouse budgets + size-limit + license allowlist + `npm audit` green.
+- [x] CI: typecheck + lint + unit (59) + e2e (smoke + axe + mobile + team + login + profile) + Lighthouse budgets + size-limit + license allowlist + `npm audit` green.
 - [ ] Vercel (free) deploy + GitHub Actions keep-warm cron — deploy user approval ke bina pending.
 - [x] Koi paid service/subscription integrate nahi hui (deps 100% OSS).
 
@@ -893,14 +921,35 @@ Sabhi audit findings implement + debug ho chuke hain. **Zero DDL** intact: sirf 
 
 | Area | Implementation |
 | --- | --- |
-| Role gates | `src/lib/roles.ts` (pure helpers) + tests. Settings write **admin only**; deletes admin/developer; team creation admin; audit write admin/staff (DB RLS ke mutabik). |
+| Role gates | `src/lib/roles.ts` (pure helpers) + tests. Settings view admin/developer, write **admin only**; financial totals (`canViewFinancials`) admin/developer; attendance edit (`canManageAttendance`) admin/developer, staff self-service (`isSelfServiceAttendance`) sirf aaj + apni row; deletes admin/developer; team creation admin; audit write admin/staff (DB RLS ke mutabik). |
+| Staff privacy | Staff nav se Settings gayab + `/settings` redirect; dashboard revenue KPI/chart/payments/amounts, sales page total aur attendance salary hidden. Attendance day view me staff sirf apni aaj ki row dekhta hai (check-in/out server-stamped, time edit nahi); month view read-only (sirf apni rows, non-clickable calendar). Client list/detail ka financial data staff ko visible hai. |
+| Profile | `/profile`: account details + last sign-in; self password change with current-password verify, optional sign-out-others, best-effort audit. Sidebar user chip bhi profile link hai. |
 | Audit | `recordActivity()` → `activity_logs` inserts for clients, jobs (create/update/status/delete/images), sales, attendance (bulk + self punch with geo), settings. Best-effort — failure user flow nahi todta. |
-| Admin user creation | `/settings?tab=team`: list + create (auth user + explicit `profiles` row, role/mechanic mapping, rollback on failure). Profile trigger dropped hai, isliye explicit insert zaroori. |
+| Admin user management | `/settings?tab=team`: list + create + **edit** (name/role/mechanic) + **password reset** + **delete**, sab admin-only. Create/edit `profiles` row explicitly (profile trigger dropped); password reset aur delete Supabase Auth admin API se. Guards: self role change/delete blocked, last admin delete/demote blocked, target team-role validate. Delete auth user first, phir profile row cleanup. |
 | Security headers | Per-request nonce CSP (Next 16 pattern), HSTS 2 years + `includeSubDomains`, `Permissions-Policy` camera/mic off + geolocation self, `X-DNS-Prefetch-Control: off`, existing `nosniff`/`DENY`/`strict-origin-when-cross-origin`. |
 | RUM | `useReportWebVitals` → `sendBeacon` → `/api/vitals` (zod-validated, 204, structured JSON logs, 2 kB cap). |
 | A11y | axe gate har smoke route par (critical/serious fail); light-theme contrast tokens darken kiye; month matrix scroll region `role="region"` + `tabIndex`. |
 | Perf tooling | `@lhci/cli` (desktop preset, authed runs via puppeteer login hook), `size-limit` budgets, `@next/bundle-analyzer` (`npm run analyze`). |
-| E2E | smoke (9 routes + axe + CSP watch), mobile 390px (overflow ≤1px), CRUD spec (double-gated — live DB writes sirf explicit opt-in par). |
+| E2E | smoke (12 routes + axe + CSP watch), mobile 390px (overflow ≤1px, includes `/search` aur `/jobs/new`), team panels, login memory, profile, CRUD spec (double-gated — live DB writes sirf explicit opt-in par). |
+
+### Search round (2026-11-01)
+
+Search/filter UX, zero DDL (sirf existing `ilike`/PostgREST queries):
+
+| Area | Implementation |
+| --- | --- |
+| Combobox | `src/components/ui/searchable-select.tsx` — type-to-filter dropdown, arrow/Enter/Escape/Tab keys, ARIA combobox + listbox, hidden input se native form submit compatible. |
+| Live list search | `src/components/ui/live-search-input.tsx` — debounced (400 ms) URL update via enclosing form (`router.replace`), status/date/due filters preserve, `page` reset. Wired into `/clients`, `/jobs`, `/sales`. |
+| Dropdown rollout | Job form (client/mechanic/service/product rows), sale form (client/mechanic/product), settings team (mechanic link) — native `<select>` sirf fixed enums (status, payment mode) par bacha. |
+| Universal search | `/search` page + header entry (desktop input, mobile icon) — clients, jobs aur sales grouped results (`getGlobalSearch`, 8 per section), "Sab dekhein" deep links to module lists. |
+| Job search match | Job search ab client name/contact se bhi match karta hai (client ids pre-query → `client_name.in.(…)`), list aur universal search dono me. |
+| Form a11y fix | Row editors ke qty/price/service/product controls labeled (unique `htmlFor`/`id`), job photo file input `sr-only` wrapper me — 390px overflow aur axe `label` violation fix. |
+
+### Shell round (2026-11-01)
+
+- Desktop sidebar ab `fixed` hai (content `lg:pl-60`, nav internal scroll) — page scroll par nav nahi khisakta; header sticky hi rehta hai.
+- Logged user top bar me: avatar + naam/role (mobile par sirf avatar) se dropdown — **My profile** aur **Logout** wahin se. Sidebar footer ka duplicate user chip hataya; sidebar nav me Profile link bacha hai.
+- Menu: outside click / Escape close, `aria-expanded` + `aria-controls`, axe clean (desktop + 390px).
 
 ### Verification (2026-11-01)
 
@@ -908,10 +957,11 @@ Sabhi audit findings implement + debug ho chuke hain. **Zero DDL** intact: sirf 
 | --- | --- |
 | `npm run typecheck` | pass |
 | `npm run lint` | pass |
-| `npm run test` | 58 tests / 12 files pass |
-| `npm run build` | pass (20 routes + proxy) |
-| `npm run test:e2e` (smoke + mobile) | 2/2 pass; axe 0 serious/critical; 0 CSP/console errors |
-| `npm run size` | JS 260.39 kB / 320 kB, CSS 7.26 kB / 60 kB |
+| `npm run test` | 60 tests / 12 files pass |
+| `npm run build` | pass (22 routes + proxy, incl. `/profile`, `/search`) |
+| `npm run test:e2e` (smoke + mobile + team + login + profile) | 5 passed / 1 skipped (gated CRUD); axe 0 serious/critical; 0 CSP/console errors |
+| Search round e2e (smoke 12 routes + mobile incl. `/search`, `/jobs/new`) | 2 passed; axe 0 serious/critical; 390px overflow 0 |
+| `npm run size` | JS 266.84 kB / 320 kB, CSS 7.36 kB / 60 kB |
 | `npm run test:lhci` (authed, prod build) | assertions pass — perf 86/100/100 (dashboard/jobs/clients), a11y 99, best-practices 100 |
 | `/api/vitals` | 204 valid, 400 invalid enum, 400 oversize |
 | Security headers | CSP nonce + HSTS + Permissions-Policy live verified |

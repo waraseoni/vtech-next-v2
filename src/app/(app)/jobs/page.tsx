@@ -1,4 +1,4 @@
-import { ClipboardList, Plus, Search } from "lucide-react";
+import { ClipboardList, Plus } from "lucide-react";
 import Link from "next/link";
 
 import { JobStatusBadge } from "@/components/jobs/job-status-badge";
@@ -6,7 +6,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Select } from "@/components/ui/select";
+import { LiveSearchInput } from "@/components/ui/live-search-input";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import { getJobsPage, getMechanicOptions } from "@/lib/data/jobs";
 import { formatIST } from "@/lib/date";
 import {
@@ -145,20 +146,12 @@ export default async function JobsPage({ searchParams }: PageProps<"/jobs">) {
               <label htmlFor="jobs-q" className="text-muted-foreground text-xs">
                 Search
               </label>
-              <div className="relative">
-                <Search
-                  className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
-                  aria-hidden
-                />
-                <Input
-                  id="jobs-q"
-                  name="q"
-                  defaultValue={q}
-                  maxLength={60}
-                  placeholder="Job id, code, item ya fault"
-                  className="pl-9"
-                />
-              </div>
+              <LiveSearchInput
+                id="jobs-q"
+                defaultValue={q}
+                placeholder="Job id, code, item ya fault"
+                ariaLabel="Search jobs"
+              />
             </div>
             <div className="grid gap-1.5">
               <label
@@ -167,18 +160,19 @@ export default async function JobsPage({ searchParams }: PageProps<"/jobs">) {
               >
                 Mechanic
               </label>
-              <Select
+              <SearchableSelect
                 id="jobs-mechanic"
                 name="mechanic"
                 defaultValue={mechanic ? String(mechanic) : ""}
-              >
-                <option value="">All</option>
-                {mechanics.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.firstname} {item.lastname}
-                  </option>
-                ))}
-              </Select>
+                placeholder="All"
+                options={[
+                  { value: "", label: "All" },
+                  ...mechanics.map((item) => ({
+                    value: String(item.id),
+                    label: `${item.firstname} ${item.lastname}`.trim(),
+                  })),
+                ]}
+              />
             </div>
             <div className="grid gap-1.5">
               <label

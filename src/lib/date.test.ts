@@ -4,6 +4,7 @@ import {
   deriveStatusFromTimes,
   dtLocalToIST,
   istDayRange,
+  istMonthDays,
   istMonthRange,
   minsBetweenIST,
   toISTDatePart,
@@ -17,7 +18,19 @@ describe("IST day range", () => {
     });
   });
 
+  it("spans the whole month, not just its last day", () => {
+    expect(istMonthRange("2026-10")).toEqual({
+      start: "2026-10-01T00:00:00.000+05:30",
+      end: "2026-10-31T23:59:59.999+05:30",
+    });
+  });
+
   it("uses the real last day of the month", () => {
+    expect(istMonthDays("2026-02")).toEqual({
+      first: "2026-02-01",
+      last: "2026-02-28",
+    });
+    expect(istMonthDays("2028-02").last).toBe("2028-02-29");
     expect(istMonthRange("2026-02").end).toBe("2026-02-28T23:59:59.999+05:30");
     expect(istMonthRange("2028-02").end).toBe("2028-02-29T23:59:59.999+05:30");
   });

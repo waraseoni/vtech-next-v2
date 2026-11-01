@@ -46,15 +46,29 @@ export function istDayRange(dateStr: string): { start: string; end: string } {
   };
 }
 
+/** First/last IST calendar day of a "YYYY-MM" month, as "YYYY-MM-DD". */
+export function istMonthDays(monthStr: string): {
+  first: string;
+  last: string;
+} {
+  const [year, month] = monthStr.split("-").map(Number);
+  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  return {
+    first: `${monthStr}-01`,
+    last: `${monthStr}-${String(lastDay).padStart(2, "0")}`,
+  };
+}
+
+/** Start instant of the first day / end instant of the last day of a month. */
 export function istMonthRange(monthStr: string): {
   start: string;
   end: string;
 } {
-  const [year, month] = monthStr.split("-").map(Number);
-  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
-  return istDayRange(
-    `${year}-${String(month).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}`,
-  );
+  const { first, last } = istMonthDays(monthStr);
+  return {
+    start: istDayRange(first).start,
+    end: istDayRange(last).end,
+  };
 }
 
 /** "YYYY-MM-DD" of an instant, in IST. */

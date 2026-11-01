@@ -6,7 +6,6 @@ import {
   computeClientBalance,
   parseLegacyClientId,
   phoneDigits,
-  resolveClientPhotoUrl,
   telHref,
   whatsAppHref,
 } from "./client";
@@ -76,19 +75,5 @@ describe("client contact helpers", () => {
       "https://wa.me/919876543210?text=Hi",
     );
     expect(whatsAppHref("12345")).toBeNull();
-  });
-
-  it("resolves both full URLs and legacy bucket paths", () => {
-    const url = "https://example.supabase.co";
-    expect(resolveClientPhotoUrl(null, url)).toBeNull();
-    expect(resolveClientPhotoUrl("https://cdn.test/a.jpg", url)).toBe(
-      "https://cdn.test/a.jpg",
-    );
-    expect(resolveClientPhotoUrl("3-123.jpeg", url)).toBe(
-      "https://example.supabase.co/storage/v1/object/public/client-photos/3-123.jpeg",
-    );
-    expect(resolveClientPhotoUrl("client-photos/3-123.jpeg", url)).toBe(
-      "https://example.supabase.co/storage/v1/object/public/client-photos/3-123.jpeg",
-    );
   });
 });

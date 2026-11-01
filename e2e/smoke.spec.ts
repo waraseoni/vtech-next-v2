@@ -19,10 +19,15 @@ test.describe("admin panel smoke", () => {
 
     const routes: Array<[string, string]> = [
       ["/jobs", "Jobsheet"],
+      ["/jobs/new", "New job"],
       ["/sales", "Sales"],
+      ["/sales/new", "New sale"],
       ["/clients", "Clients"],
+      ["/search", "Search"],
+      ["/search?q=ac", "Search"],
       ["/attendance", "Attendance"],
       ["/attendance?view=month", "Attendance"],
+      ["/profile", "My profile"],
       ["/settings", "Settings"],
       ["/settings?tab=attendance", "Settings"],
       ["/settings?tab=team", "Settings"],

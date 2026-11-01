@@ -79,21 +79,3 @@ export function whatsAppHref(
   if (text) url.searchParams.set("text", text);
   return url.toString();
 }
-
-/**
- * Stored paths are either full public URLs (new uploads) or bucket-relative
- * paths written by the legacy app.
- */
-export function resolveClientPhotoUrl(
-  imagePath: string | null | undefined,
-  supabaseUrl: string,
-): string | null {
-  const path = imagePath?.trim();
-  if (!path) return null;
-  if (/^https?:\/\//i.test(path)) return path;
-  const clean = path.replace(/^\/+/, "");
-  const objectPath = clean.startsWith("client-photos/")
-    ? clean
-    : `client-photos/${clean}`;
-  return `${supabaseUrl.replace(/\/+$/, "")}/storage/v1/object/public/${objectPath}`;
-}
