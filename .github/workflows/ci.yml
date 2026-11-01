@@ -22,7 +22,7 @@ jobs:
       # karna hoga — tab gate intentionally red hoga taaki review ho.
       LICENSE_EXCLUDE_PACKAGES: "@img/sharp-libvips-darwin-arm64@1.3.4;@img/sharp-libvips-darwin-x64@1.3.4;@img/sharp-libvips-linux-arm@1.3.4;@img/sharp-libvips-linux-arm64@1.3.4;@img/sharp-libvips-linux-ppc64@1.3.4;@img/sharp-libvips-linux-riscv64@1.3.4;@img/sharp-libvips-linux-s390x@1.3.4;@img/sharp-libvips-linux-x64@1.3.4;@img/sharp-libvips-linuxmusl-arm64@1.3.4;@img/sharp-libvips-linuxmusl-x64@1.3.4"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v4
         with:
