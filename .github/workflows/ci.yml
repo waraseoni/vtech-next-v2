@@ -1,0 +1,57 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    env:
+      NEXT_PUBLIC_SUPABASE_URL: https://ci.supabase.co
+      NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: sb_publishable_ci_dummy
+      SUPABASE_SECRET_KEY: sb_secret_ci_dummy
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm run test
+
+      - name: License gate (production)
+        run: >
+          npx --no-install license-checker
+          --production --excludePrivatePackages
+          --onlyAllow "MIT;Apache-2.0;ISC;BSD-2-Clause;BSD-3-Clause;0BSD;Unlicense;CC0-1.0;CC-BY-4.0"
+
+      - name: License gate (all deps)
+        run: >
+          npx --no-install license-checker
+          --excludePrivatePackages
+          --onlyAllow "MIT;Apache-2.0;ISC;BSD;BSD-2-Clause;BSD-3-Clause;0BSD;Unlicense;CC0-1.0;CC-BY-4.0;CC-BY-3.0;MPL-2.0;Python-2.0;BlueOak-1.0.0"
+
+      - name: Production audit
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Outdated report (non-blocking)
+        run: npm outdated || true
+
+      - name: Build
+        run: npm run build

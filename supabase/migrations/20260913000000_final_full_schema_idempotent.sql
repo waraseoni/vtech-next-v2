@@ -1,0 +1,4585 @@
+-- ═══════════════════════════════════════════════════════════════════════════
+-- V-TECH IDEMPOTENT FULL SCHEMA — FRESH + EXISTING Supabase project dono ke liye
+-- Source: backups/supabase/baseline_schema.sql (pg_dump schema-only, PG 17)
+--
+-- MAQSAD (purpose):
+--   Kisi bhi SAME-CODEBASE Supabase project ke `public` schema ko, bina data
+--   khone (data-loss) ke, current LIVE state tak le jao — CHAHE wo project
+--   bilkul FRESH ho (khaali), YA pehle se populated/partial ho.
+--
+-- Ye file FULLY IDEMPOTENT (dobaara chalao) aur ADDITIVE-ONLY hai:
+--   • Har statement "already exists" ko guard karta hai (IF NOT EXISTS / DO-guard).
+--   • Koi DELETE / TRUNCATE / DESTRUCTIVE ALTER NAHI — existing tables, columns
+--     aur rows KOI touch nahi hote. Missing cheezein hi add hoti hain.
+--   • FREQUENCY: safe hai har release/migration me re-run karna.
+--
+-- Notes:
+--   • Is file me auth / storage SCHEMAS nahi hain — wo Supabase khud auto-create
+--     karta hai har naye project me. Sirf `public` schema + storage buckets.
+--   • Naye tables/columns add hote hain; pehle se maujood tables pe RLS enabled,
+--     policies DROP+CREATE, triggers DROP+CREATE (data-safe).
+--   • `storage.buckets` insert `on conflict (id) do nothing` se idempotent hai.
+--
+-- VALIDATED (2026-09-03) — local PostgreSQL 18 par dono main scenarios test kiye:
+--   1. FRESH create  ➜ EXIT 0, koi error nahi (40 tables, 48 policies, 8 triggers,
+--      2 enums, RLS sab tables pe enabled, get_dashboard_stats RPC chal raha hai).
+--   2. RE-RUN ek ALREADY-populated DB par ➜ EXIT 0, koi error nahi, aur seeded rows
+--      (client/product/transaction/profile) re-run ke BAAD bhi byte-identical mili —
+--      ZERO data loss. (Isi liye har re-run safe hai.)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+--
+-- Required extension: moddatetime (fresh project par default INSTALLED NAHI hota)
+-- — public.update_date_updated / extensions.moddatetime triggers isi par depend karte hain
+--
+CREATE EXTENSION IF NOT EXISTS moddatetime WITH SCHEMA extensions;
+
+--
+-- Required extension: pg_trgm (20261018_perf_indexes.sql) — trigram GIN indexes
+-- ke liye (`gin_trgm_ops`). Navbar universal search leading-wildcard
+-- `ILIKE '%q%'` chalata hai, jo btree use NAHI kar sakta — sirf trgm.
+-- Fresh project par default INSTALLED NAHI hota.
+--
+CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA extensions;
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- ENUMS (2) — PostgreSQL me `CREATE TYPE IF NOT EXISTS` nahi hai,
+-- isliye DO-block se guard kiya gaya hai (typname + public namespace check).
+-- ═══════════════════════════════════════════════════════════════════════════
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'payment_mode_type' AND typnamespace = 'public'::regnamespace) THEN
+    CREATE TYPE public.payment_mode_type AS ENUM (
+        'Cash',
+        'UPI',
+        'NEFT',
+        'Cheque',
+        'Bank Transfer',
+        'PhonePe/GPay'
+    );
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'payment_type_type' AND typnamespace = 'public'::regnamespace) THEN
+    CREATE TYPE public.payment_type_type AS ENUM (
+        'Full',
+        'Partial',
+        'Advance',
+        'On Account'
+    );
+  END IF;
+END $$;
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- TABLES (40) — CREATE TABLE IF NOT EXISTS (columns + inline constraints verbatim).
+-- Existing tables/data untouched. `ALTER TABLE ... OWNER` DROP kar diya hai.
+-- Note: purchase_order_items / purchase_orders / push_subscriptions tables
+-- hadiyaan (id) idhaar plain NOT NULL hain; identity step (g) me guard se lagti hai.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS public.activity_logs (
+    id bigint NOT NULL,
+    user_id integer,
+    action text,
+    module text,
+    meta_id text,
+    details text,
+    date_created timestamp with time zone DEFAULT now()
+);
+
+
+
+CREATE TABLE IF NOT EXISTS public.advance_payments (
+    id integer NOT NULL,
+    mechanic_id integer NOT NULL,
+    amount numeric(12,2) DEFAULT 0.00 NOT NULL,
+    date_paid date NOT NULL,
+    reason text,
+    date_created timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+
+
+CREATE TABLE IF NOT EXISTS public.attendance_list (
+    id integer NOT NULL,
+    mechanic_id integer NOT NULL,
+    status smallint DEFAULT 0 NOT NULL,
+    curr_date date NOT NULL,
+    time_in time without time zone,
+    time_out time without time zone,
+    lat_in double precision,
+    lng_in double precision,
+    lat_out double precision,
+    lng_out double precision
+);
+
+
+
+CREATE TABLE IF NOT EXISTS public.client_list (
+    id integer NOT NULL,
+    firstname text NOT NULL,
+    middlename text,
+    lastname text NOT NULL,
+    contact character varying(100) NOT NULL,
+    email text,
+    address text NOT NULL,
+    image_path text,
+    opening_balance numeric(15,2) DEFAULT 0.00,
+    delete_flag smallint DEFAULT 0 NOT NULL,
+    date_created timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    date_updated timestamp without time zone,
+    payment_due_date date,
+    payment_due_remarks text,
+    login_allowed boolean DEFAULT false NOT NULL
+);
+
+
+
+CREATE TABLE IF NOT EXISTS public.client_loans (
+    id integer NOT NULL,
+    client_id integer NOT NULL,
+    principal_amount numeric(12,2) NOT NULL,
+    interest_rate numeric(5,2) DEFAULT 0.00,
+    loan_period integer NOT NULL,
+    total_payable numeric(12,2) NOT NULL,
+    emi_amount numeric(12,2) NOT NULL,
+    remarks text,
+    loan_date date NOT NULL,
+    status smallint DEFAULT 1,
+    created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP
+);
+
+
+
+CREATE TABLE IF NOT EXISTS public.client_payments (
+    id integer NOT NULL,
+    client_id integer NOT NULL,
+    job_id character varying(50) DEFAULT NULL::character varying,
+    loan_id integer,
+    bill_no character varying(50) DEFAULT NULL::character varying,
+    payment_date date DEFAULT CURRENT_DATE,
+    amount numeric(10,2) NOT NULL,
+    discount numeric(10,2) DEFAULT 0.00,
+    net_amount numeric(10,2) GENERATED ALWAYS AS ((amount - discount)) STORED,
+    payment_mode public.payment_mode_type DEFAULT 'Cash'::public.payment_mode_type,
+    payment_type public.payment_type_type DEFAULT 'Full'::public.payment_type_type,
+    remarks text,
+    created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP
+);
+
+
+
+CREATE TABLE IF NOT EXISTS public.direct_sale_items (
+    id integer NOT NULL,
+    sale_id integer NOT NULL,
+    product_id integer NOT NULL,
+    qty integer NOT NULL,
+    price numeric(15,2) NOT NULL
+);
+
+
+
+CREATE TABLE IF NOT EXISTS public.direct_sales (
+    id integer NOT NULL,
+    sale_code character varying(100) NOT NULL,
+    client_id integer,
+    mechanic_id integer,
+    total_amount numeric(15,2) NOT NULL,
+    payment_mode character varying(50) NOT NULL,
+    remarks text,
+    last_edited_by integer,
+    last_edited_by_name character varying(100) DEFAULT NULL::character varying,
+    last_edited_date timestamp without time zone,
+    date_created timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+
+
+CREATE TABLE IF NOT EXISTS public.expense_list (
+    id integer NOT NULL,
+    category character varying(200) NOT NULL,
+    amount numeric(15,2) DEFAULT 0.00 NOT NULL,
+    remarks text,
+    date_created timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+
+
+CREATE TABLE IF NOT EXISTS public.inventory_list (
+    id integer NOT NULL,
+    product_id integer NOT NULL,
+    quantity integer DEFAULT 0 NOT NULL,
+    place text,
+    stock_date date NOT NULL,
+    date_created timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    date_updated timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    supplier_id bigint,
+    purchase_cost numeric(12,2) DEFAULT 0 NOT NULL,
+    courier_charges numeric(12,2) DEFAULT 0 NOT NULL,
+    place_zone text,
+    place_rack text,
+    place_bin text,
+    place_box text,
+    purchase_order_id integer
+);
+
+
+
+CREATE TABLE IF NOT EXISTS public.job_id_counter (
+    id integer NOT NULL,
+    last_job_id integer DEFAULT 0
+);
+
+
+
+CREATE TABLE IF NOT EXISTS public.lender_list (
+    id integer NOT NULL,
+    fullname character varying(250) NOT NULL,
+    contact character varying(20) NOT NULL,
+    loan_amount numeric(12,2) DEFAULT 0 NOT NULL,
+    interest_rate numeric(5,2) DEFAULT 0.00 NOT NULL,
+    tenure_months integer DEFAULT 0 NOT NULL,
+    reason text,
+    emi_amount numeric(12,2) DEFAULT 0 NOT NULL,
+    start_date date NOT NULL,
+    status smallint DEFAULT 1 NOT NULL,
+    date_created timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+
+
+CREATE TABLE IF NOT EXISTS public.loan_payments (
+    id integer NOT NULL,
+    lender_id integer NOT NULL,
+    amount_paid double precision DEFAULT 0 NOT NULL,
+    payment_date date NOT NULL,
+    remarks text
+);
+
+
+
+CREATE TABLE IF NOT EXISTS public.login_throttle (
+    id bigint NOT NULL,
+    email text NOT NULL,
+    ip_address text NOT NULL,
+    attempt_count integer DEFAULT 0 NOT NULL,
+    lock_repeats integer DEFAULT 0 NOT NULL,
+    first_attempt_at timestamp with time zone,
+    lockout_until timestamp with time zone,
+    last_attempt_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+
+CREATE TABLE IF NOT EXISTS public.mechanic_commission_history (
+    id integer NOT NULL,
+    mechanic_id integer NOT NULL,
+    commission_percent numeric(5,2) NOT NULL,
+    effective_date date NOT NULL,
+    date_created timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+
+
+CREATE TABLE IF NOT EXISTS public.mechanic_list (
+    id integer NOT NULL,
+    firstname character varying(250) NOT NULL,
+    middlename text,
+    lastname character varying(250) NOT NULL,
+    contact character varying(50) NOT NULL,
+    designation character varying(100) DEFAULT 'Mechanic'::character varying,
+    daily_salary numeric(12,2) DEFAULT 0.00,
+    avatar character varying(255) DEFAULT 'default-avatar.jpg'::character varying,
+    commission_percent numeric(5,2) DEFAULT 0.00,
+    status smallint DEFAULT 1 NOT NULL,
+    delete_flag smallint DEFAULT 0 NOT NULL,
+    date_added timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    date_updated timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    salary_per_day numeric(10,2) DEFAULT 0.00 NOT NULL,
+    image_path text,
+    CONSTRAINT chk_commission CHECK (((commission_percent >= (0)::numeric) AND (commission_percent <= (100)::numeric))),
+    CONSTRAINT chk_salary CHECK ((daily_salary >= (0)::numeric)),
+    CONSTRAINT chk_salary_per_day CHECK ((salary_per_day >= (0)::numeric))
+);
+
+
+
+CREATE TABLE IF NOT EXISTS public.mechanic_salary_history (
+    id integer NOT NULL,
+    mechanic_id integer NOT NULL,
+    salary numeric(12,2) DEFAULT 0.00 NOT NULL,
+    effective_date date NOT NULL,
+    date_created timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+
+
+CREATE TABLE IF NOT EXISTS public.message_list (
+    id integer NOT NULL,
+    fullname text NOT NULL,
+    contact text NOT NULL,
+    email text NOT NULL,
+    message text NOT NULL,
+    status smallint DEFAULT 0 NOT NULL,
+    date_created timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+
+
+CREATE TABLE IF NOT EXISTS public.payment_reminders (
+    id bigint NOT NULL,
+    client_id bigint NOT NULL,
+    amount_due numeric(15,2) DEFAULT 0 NOT NULL,
+    reminder_date timestamp with time zone DEFAULT now() NOT NULL,
+    channel character varying(50) DEFAULT 'System Alert'::character varying,
+    status character varying(50) DEFAULT 'Sent'::character varying,
+    remarks text
+);
+
+
+
+CREATE TABLE IF NOT EXISTS public.product_list (
+    id integer NOT NULL,
+    name text NOT NULL,
+    description text NOT NULL,
+    cost_price numeric(15,2) DEFAULT 0 NOT NULL,
+    price numeric(15,2) DEFAULT 0 NOT NULL,
+    image_path text,
+    status smallint DEFAULT 1 NOT NULL,
+    delete_flag smallint DEFAULT 0 NOT NULL,
+    date_created timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    date_updated timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    hsn character varying(20) DEFAULT ''::character varying NOT NULL,
+    alert_quantity integer DEFAULT 0 NOT NULL,
+    barcode character varying(100) DEFAULT NULL::character varying,
+    place_zone text,
+    place_rack text,
+    place_bin text,
+    place_box text,
+    CONSTRAINT positive_price CHECK ((price >= cost_price)),
+    CONSTRAINT product_list_cost_price_check CHECK ((cost_price >= (0)::numeric)),
+    CONSTRAINT product_list_delete_flag_check CHECK ((delete_flag = ANY (ARRAY[0, 1]))),
+    CONSTRAINT product_list_price_check CHECK ((price >= (0)::numeric)),
+    CONSTRAINT product_list_status_check CHECK ((status = ANY (ARRAY[0, 1, 2])))
+);
+
+
+
+CREATE TABLE IF NOT EXISTS public.profiles (
+    id uuid NOT NULL,
+    full_name text,
+    role text DEFAULT 'staff'::text,
+    avatar_url text,
+    updated_at timestamp with time zone DEFAULT now(),
+    mechanic_id bigint,
+    email text,
+    date_updated timestamp with time zone DEFAULT now(),
+    client_id bigint,
+    CONSTRAINT profiles_role_check CHECK ((role = ANY (ARRAY['admin'::text, 'staff'::text, 'client'::text, 'developer'::text])))
+);
+
+-- ── Messenger: user_presence + messages (20260901_messenger_presence.sql) ──
+CREATE TABLE IF NOT EXISTS public.user_presence (
+    user_id uuid NOT NULL,
+    status text NOT NULL DEFAULT 'offline'::text,
+    last_seen timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT user_presence_status_check CHECK ((status = ANY (ARRAY['online'::text, 'offline'::text])))
+);
+
+CREATE TABLE IF NOT EXISTS public.messages (
+    id bigint NOT NULL,
+    sender_id uuid NOT NULL,
+    recipient_id uuid NOT NULL,
+    content text NOT NULL,
+    read_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    delivered_at timestamptz,
+    media_url text,
+    media_type text,
+    media_name text,
+    deleted_at timestamptz,
+    CONSTRAINT messages_no_self CHECK ((sender_id <> recipient_id)),
+    CONSTRAINT messages_content_check CHECK ((char_length(btrim(content)) > 0))
+);
+
+CREATE TABLE IF NOT EXISTS public.service_list (
+    id integer NOT NULL,
+    name text NOT NULL,
+    description text NOT NULL,
+    price numeric(12,2) DEFAULT 0.00 NOT NULL,
+    status smallint DEFAULT 1 NOT NULL,
+    delete_flag smallint DEFAULT 0 NOT NULL,
+    date_created timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    date_updated timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    hsn character varying(20) DEFAULT ''::character varying NOT NULL,
+    CONSTRAINT service_list_delete_flag_check CHECK ((delete_flag = ANY (ARRAY[0, 1]))),
+    CONSTRAINT service_list_price_check CHECK ((price >= (0)::numeric)),
+    CONSTRAINT service_list_status_check CHECK ((status = ANY (ARRAY[0, 1, 2])))
+);
+
+
+
+CREATE TABLE IF NOT EXISTS public.spare_supplier (
+    spare_id bigint NOT NULL,
+    supplier_id bigint NOT NULL
+);
+
+
+
+CREATE TABLE IF NOT EXISTS public.suppliers (
+    id bigint NOT NULL,
+    name text DEFAULT ''::text NOT NULL,
+    contact text DEFAULT ''::text NOT NULL,
+    email text DEFAULT ''::text NOT NULL,
+    address text DEFAULT ''::text NOT NULL,
+    status bigint DEFAULT 1 NOT NULL,
+    delete_flag bigint DEFAULT 0 NOT NULL,
+    date_created timestamp with time zone DEFAULT now() NOT NULL,
+    date_updated timestamp with time zone DEFAULT now() NOT NULL,
+    photo_url text DEFAULT ''::text NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS public.supplier_contacts (
+    id bigint NOT NULL,
+    supplier_id bigint NOT NULL,
+    label text DEFAULT ''::text NOT NULL,
+    phone text DEFAULT ''::text NOT NULL,
+    is_primary boolean DEFAULT false NOT NULL,
+    date_created timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+
+CREATE TABLE IF NOT EXISTS public.system_info (
+    id integer NOT NULL,
+    meta_field text NOT NULL,
+    meta_value text NOT NULL
+);
+
+
+
+CREATE TABLE IF NOT EXISTS public.transaction_images (
+    id integer NOT NULL,
+    transaction_id integer NOT NULL,
+    image_path character varying(255) NOT NULL,
+    date_created timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+
+
+CREATE TABLE IF NOT EXISTS public.transaction_list (
+    id integer NOT NULL,
+    user_id integer NOT NULL,
+    mechanic_id integer,
+    code character varying(100) NOT NULL,
+    job_id character varying(20) DEFAULT NULL::character varying,
+    client_name text,
+    fault text NOT NULL,
+    remark text NOT NULL,
+    item text NOT NULL,
+    uniq_id text NOT NULL,
+    amount numeric(15,2) DEFAULT 0 NOT NULL,
+    mechanic_amount numeric(12,2) DEFAULT 0 NOT NULL,
+    mechanic_commission_amount numeric(12,2) DEFAULT 0,
+    del_status smallint DEFAULT 0 NOT NULL,
+    status smallint DEFAULT 0 NOT NULL,
+    date_created timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    date_updated timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    date_completed timestamp with time zone,
+    location_id integer,
+    CONSTRAINT transaction_list_amount_check CHECK ((amount >= (0)::numeric)),
+    CONSTRAINT transaction_list_del_status_check CHECK ((del_status = ANY (ARRAY[0, 1]))),
+    CONSTRAINT transaction_list_mechanic_amount_check CHECK ((mechanic_amount >= (0)::numeric)),
+    CONSTRAINT transaction_list_mechanic_commission_amount_check CHECK ((mechanic_commission_amount >= (0)::numeric)),
+    CONSTRAINT transaction_list_status_check CHECK ((status = ANY (ARRAY[0, 1, 2, 3, 4, 5]))),
+    CONSTRAINT valid_del_status CHECK (((del_status >= 0) AND (del_status <= 1))),
+    CONSTRAINT valid_transaction_status CHECK (((status >= 0) AND (status <= 5)))
+);
+
+
+
+CREATE TABLE IF NOT EXISTS public.transaction_products (
+    transaction_id integer NOT NULL,
+    product_id integer NOT NULL,
+    product_name text,
+    qty integer DEFAULT 0 NOT NULL,
+    price numeric(12,2) DEFAULT 0.00 NOT NULL
+);
+
+
+
+CREATE TABLE IF NOT EXISTS public.transaction_services (
+    transaction_id integer NOT NULL,
+    service_id integer NOT NULL,
+    service_name text,
+    price numeric(12,2) DEFAULT 0.00 NOT NULL
+);
+
+
+
+CREATE TABLE IF NOT EXISTS public.users (
+    id integer NOT NULL,
+    firstname character varying(250) NOT NULL,
+    lastname character varying(250) NOT NULL,
+    username character varying(100) NOT NULL,
+    password character varying(255) NOT NULL,
+    avatar text,
+    last_login timestamp with time zone,
+    type smallint DEFAULT 0 NOT NULL,
+    mechanic_id integer,
+    date_added timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    date_updated timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT users_type_check CHECK ((type = ANY (ARRAY[0, 1, 2, 3])))
+);
+
+
+
+CREATE TABLE IF NOT EXISTS public.wp_template_history (
+    id bigint NOT NULL,
+    template_key text DEFAULT ''::text NOT NULL,
+    action text DEFAULT ''::text NOT NULL,
+    old_value text,
+    new_value text,
+    changed_by text DEFAULT ''::text NOT NULL,
+    changed_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+
+CREATE TABLE IF NOT EXISTS public.location_zones (
+    id serial PRIMARY KEY,
+    name text NOT NULL UNIQUE,
+    status int NOT NULL DEFAULT 1,
+    delete_flag int NOT NULL DEFAULT 0,
+    created_at timestamptz DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.location_racks (
+    id serial PRIMARY KEY,
+    zone_id integer NOT NULL,
+    name text NOT NULL,
+    status int NOT NULL DEFAULT 1,
+    delete_flag int NOT NULL DEFAULT 0,
+    created_at timestamptz DEFAULT now(),
+    UNIQUE(zone_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS public.location_bins (
+    id serial PRIMARY KEY,
+    rack_id integer NOT NULL,
+    name text NOT NULL,
+    status int NOT NULL DEFAULT 1,
+    delete_flag int NOT NULL DEFAULT 0,
+    created_at timestamptz DEFAULT now(),
+    UNIQUE(rack_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS public.location_boxes (
+    id serial PRIMARY KEY,
+    bin_id integer NOT NULL,
+    name text NOT NULL,
+    status int NOT NULL DEFAULT 1,
+    delete_flag int NOT NULL DEFAULT 0,
+    created_at timestamptz DEFAULT now(),
+    UNIQUE(bin_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS public.locations (
+    id serial PRIMARY KEY,
+    zone text NOT NULL,
+    rack text NOT NULL DEFAULT ''::text,
+    bin text NOT NULL DEFAULT ''::text,
+    box text NOT NULL DEFAULT ''::text,
+    label text,
+    status int NOT NULL DEFAULT 1,
+    delete_flag int NOT NULL DEFAULT 0,
+    created_at timestamptz DEFAULT now(),
+    code text,
+    zone_id integer,
+    rack_id integer,
+    bin_id integer,
+    box_id integer,
+    kind text NOT NULL DEFAULT 'inventory'::text,
+    UNIQUE(zone, rack, bin, box)
+);
+
+CREATE TABLE IF NOT EXISTS public.product_locations (
+    product_id integer NOT NULL,
+    location_id integer NOT NULL,
+    created_at timestamptz DEFAULT now(),
+    PRIMARY KEY (product_id, location_id)
+);
+
+CREATE TABLE IF NOT EXISTS public.purchase_order_items (
+    id bigint NOT NULL,
+    purchase_order_id bigint NOT NULL,
+    product_id bigint NOT NULL,
+    qty_ordered integer DEFAULT 0 NOT NULL,
+    qty_received integer DEFAULT 0 NOT NULL,
+    unit_cost numeric(12,2) DEFAULT 0 NOT NULL,
+    date_created timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+
+CREATE TABLE IF NOT EXISTS public.purchase_orders (
+    id bigint NOT NULL,
+    po_code text NOT NULL,
+    supplier_id bigint,
+    status text DEFAULT 'pending'::text NOT NULL,
+    expected_date date,
+    notes text DEFAULT ''::text,
+    total_amount numeric(12,2) DEFAULT 0 NOT NULL,
+    received_date date,
+    date_created timestamp with time zone DEFAULT now() NOT NULL,
+    date_updated timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT purchase_orders_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'ordered'::text, 'received'::text, 'cancelled'::text])))
+);
+
+
+
+CREATE TABLE IF NOT EXISTS public.push_subscriptions (
+    id bigint NOT NULL,
+    user_id uuid,
+    endpoint text NOT NULL,
+    p256dh text DEFAULT ''::text NOT NULL,
+    auth text DEFAULT ''::text NOT NULL,
+    device_name text DEFAULT ''::text,
+    enabled boolean DEFAULT true NOT NULL,
+    date_created timestamp with time zone DEFAULT now() NOT NULL,
+    date_updated timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- COLUMN-ADD GUARDS (step 6) — idempotent + DATA-SAFE:
+--   har table ke liye ek DO-block, har missing column ko add karta hai.
+--   NULLABLE-SAFETY RULE: jo column `NOT NULL` + NO DEFAULT tha, usko yahaan
+--   sirf `<type>` (nullable) add karte hain — taaki populated table pe
+--   "column contains null values" ERROR na aaye. Fresh-create path upar
+--   CREATE TABLE me hi NOT NULL/constraints laga deta hai.
+--   (Table-level CHECK/FK/REFERENCES/UNIQUE constraints yahaan nahi daalte —
+--    wo alag guarded sections me hain.)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+do $$ begin
+  alter table public.activity_logs add column if not exists id bigint;
+  alter table public.activity_logs add column if not exists user_id integer;
+  alter table public.activity_logs add column if not exists action text;
+  alter table public.activity_logs add column if not exists module text;
+  alter table public.activity_logs add column if not exists meta_id text;
+  alter table public.activity_logs add column if not exists details text;
+  alter table public.activity_logs add column if not exists date_created timestamp with time zone DEFAULT now();
+  -- Geofence per-write location tags (20260927_activity_geo_tags.sql).
+  -- Nullable + IF NOT EXISTS → purani rows NULL, koi backfill nahi. Office se
+  -- hua kaam bilkul as-is dikhta hai (DATA_MIGRATION_NOTES: naya convention
+  -- sirf naye logs me).
+  alter table public.activity_logs add column if not exists geo_lat double precision DEFAULT NULL;
+  alter table public.activity_logs add column if not exists geo_lng double precision DEFAULT NULL;
+  alter table public.activity_logs add column if not exists geo_distance_m integer DEFAULT NULL;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.advance_payments add column if not exists id integer;
+  alter table public.advance_payments add column if not exists mechanic_id integer;
+  alter table public.advance_payments add column if not exists amount numeric(12,2) DEFAULT 0.00 NOT NULL;
+  alter table public.advance_payments add column if not exists date_paid date;
+  alter table public.advance_payments add column if not exists reason text;
+  alter table public.advance_payments add column if not exists date_created timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.attendance_list add column if not exists id integer;
+  alter table public.attendance_list add column if not exists mechanic_id integer;
+  alter table public.attendance_list add column if not exists status smallint DEFAULT 0 NOT NULL;
+  alter table public.attendance_list add column if not exists curr_date date;
+  alter table public.attendance_list add column if not exists time_in time without time zone;
+  alter table public.attendance_list add column if not exists time_out time without time zone;
+  alter table public.attendance_list add column if not exists lat_in double precision;
+  alter table public.attendance_list add column if not exists lng_in double precision;
+  alter table public.attendance_list add column if not exists lat_out double precision;
+  alter table public.attendance_list add column if not exists lng_out double precision;
+  -- P3 derived working-hours cols (20261002_attendance_derived_cols.sql)
+  alter table public.attendance_list add column if not exists worked_min integer;
+  alter table public.attendance_list add column if not exists ot_min integer DEFAULT 0 NOT NULL;
+  alter table public.attendance_list add column if not exists duty_min integer;
+  alter table public.attendance_list add column if not exists is_auto_closed boolean DEFAULT false NOT NULL;
+  exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.client_list add column if not exists id integer;
+  alter table public.client_list add column if not exists firstname text;
+  alter table public.client_list add column if not exists middlename text;
+  alter table public.client_list add column if not exists lastname text;
+  alter table public.client_list add column if not exists contact character varying(100);
+  alter table public.client_list add column if not exists email text;
+  alter table public.client_list add column if not exists address text;
+  alter table public.client_list add column if not exists image_path text;
+  alter table public.client_list add column if not exists opening_balance numeric(15,2) DEFAULT 0.00;
+  alter table public.client_list add column if not exists delete_flag smallint DEFAULT 0 NOT NULL;
+  alter table public.client_list add column if not exists date_created timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL;
+  alter table public.client_list add column if not exists date_updated timestamp without time zone;
+  alter table public.client_list add column if not exists payment_due_date date;
+  alter table public.client_list add column if not exists payment_due_remarks text;
+  alter table public.client_list add column if not exists login_allowed boolean DEFAULT false NOT NULL;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.client_loans add column if not exists id integer;
+  alter table public.client_loans add column if not exists client_id integer;
+  alter table public.client_loans add column if not exists principal_amount numeric(12,2);
+  alter table public.client_loans add column if not exists interest_rate numeric(5,2) DEFAULT 0.00;
+  alter table public.client_loans add column if not exists loan_period integer;
+  alter table public.client_loans add column if not exists total_payable numeric(12,2);
+  alter table public.client_loans add column if not exists emi_amount numeric(12,2);
+  alter table public.client_loans add column if not exists remarks text;
+  alter table public.client_loans add column if not exists loan_date date;
+  alter table public.client_loans add column if not exists status smallint DEFAULT 1;
+  alter table public.client_loans add column if not exists created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.client_payments add column if not exists id integer;
+  alter table public.client_payments add column if not exists client_id integer;
+  alter table public.client_payments add column if not exists job_id character varying(50) DEFAULT NULL::character varying;
+  alter table public.client_payments add column if not exists loan_id integer;
+  alter table public.client_payments add column if not exists bill_no character varying(50) DEFAULT NULL::character varying;
+  alter table public.client_payments add column if not exists payment_date date DEFAULT CURRENT_DATE;
+  alter table public.client_payments add column if not exists amount numeric(10,2);
+  alter table public.client_payments add column if not exists discount numeric(10,2) DEFAULT 0.00;
+  alter table public.client_payments add column if not exists net_amount numeric(10,2);
+  alter table public.client_payments add column if not exists payment_mode public.payment_mode_type DEFAULT 'Cash'::public.payment_mode_type;
+  alter table public.client_payments add column if not exists payment_type public.payment_type_type DEFAULT 'Full'::public.payment_type_type;
+  alter table public.client_payments add column if not exists remarks text;
+  alter table public.client_payments add column if not exists created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.direct_sale_items add column if not exists id integer;
+  alter table public.direct_sale_items add column if not exists sale_id integer;
+  alter table public.direct_sale_items add column if not exists product_id integer;
+  alter table public.direct_sale_items add column if not exists qty integer;
+  alter table public.direct_sale_items add column if not exists price numeric(15,2);
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.direct_sales add column if not exists id integer;
+  alter table public.direct_sales add column if not exists sale_code character varying(100);
+  alter table public.direct_sales add column if not exists client_id integer;
+  alter table public.direct_sales add column if not exists mechanic_id integer;
+  alter table public.direct_sales add column if not exists total_amount numeric(15,2);
+  alter table public.direct_sales add column if not exists payment_mode character varying(50);
+  alter table public.direct_sales add column if not exists remarks text;
+  alter table public.direct_sales add column if not exists last_edited_by integer;
+  alter table public.direct_sales add column if not exists last_edited_by_name character varying(100) DEFAULT NULL::character varying;
+  alter table public.direct_sales add column if not exists last_edited_date timestamp without time zone;
+  alter table public.direct_sales add column if not exists date_created timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.expense_list add column if not exists id integer;
+  alter table public.expense_list add column if not exists category character varying(200);
+  alter table public.expense_list add column if not exists amount numeric(15,2) DEFAULT 0.00 NOT NULL;
+  alter table public.expense_list add column if not exists remarks text;
+  alter table public.expense_list add column if not exists date_created timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.inventory_list add column if not exists id integer;
+  alter table public.inventory_list add column if not exists product_id integer;
+  alter table public.inventory_list add column if not exists quantity integer DEFAULT 0 NOT NULL;
+  alter table public.inventory_list add column if not exists place text;
+  alter table public.inventory_list add column if not exists stock_date date;
+  alter table public.inventory_list add column if not exists date_created timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL;
+  alter table public.inventory_list add column if not exists date_updated timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL;
+  alter table public.inventory_list add column if not exists supplier_id bigint;
+  alter table public.inventory_list add column if not exists purchase_cost numeric(12,2) DEFAULT 0 NOT NULL;
+  alter table public.inventory_list add column if not exists courier_charges numeric(12,2) DEFAULT 0 NOT NULL;
+  alter table public.inventory_list add column if not exists place_zone text;
+  alter table public.inventory_list add column if not exists place_rack text;
+  alter table public.inventory_list add column if not exists place_bin text;
+  alter table public.inventory_list add column if not exists place_box text;
+  alter table public.inventory_list add column if not exists purchase_order_id integer;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.job_id_counter add column if not exists id integer;
+  alter table public.job_id_counter add column if not exists last_job_id integer DEFAULT 0;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.lender_list add column if not exists id integer;
+  alter table public.lender_list add column if not exists fullname character varying(250);
+  alter table public.lender_list add column if not exists contact character varying(20);
+  alter table public.lender_list add column if not exists loan_amount numeric(12,2) DEFAULT 0 NOT NULL;
+  alter table public.lender_list add column if not exists interest_rate numeric(5,2) DEFAULT 0.00 NOT NULL;
+  alter table public.lender_list add column if not exists tenure_months integer DEFAULT 0 NOT NULL;
+  alter table public.lender_list add column if not exists reason text;
+  alter table public.lender_list add column if not exists emi_amount numeric(12,2) DEFAULT 0 NOT NULL;
+  alter table public.lender_list add column if not exists start_date date;
+  alter table public.lender_list add column if not exists status smallint DEFAULT 1 NOT NULL;
+  alter table public.lender_list add column if not exists date_created timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.loan_payments add column if not exists id integer;
+  alter table public.loan_payments add column if not exists lender_id integer;
+  alter table public.loan_payments add column if not exists amount_paid double precision DEFAULT 0 NOT NULL;
+  alter table public.loan_payments add column if not exists payment_date date;
+  alter table public.loan_payments add column if not exists remarks text;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.login_throttle add column if not exists id bigint;
+  alter table public.login_throttle add column if not exists email text;
+  alter table public.login_throttle add column if not exists ip_address text;
+  alter table public.login_throttle add column if not exists attempt_count integer DEFAULT 0 NOT NULL;
+  alter table public.login_throttle add column if not exists lock_repeats integer DEFAULT 0 NOT NULL;
+  alter table public.login_throttle add column if not exists first_attempt_at timestamp with time zone;
+  alter table public.login_throttle add column if not exists lockout_until timestamp with time zone;
+  alter table public.login_throttle add column if not exists last_attempt_at timestamp with time zone DEFAULT now() NOT NULL;
+  alter table public.login_throttle add column if not exists updated_at timestamp with time zone DEFAULT now() NOT NULL;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.mechanic_commission_history add column if not exists id integer;
+  alter table public.mechanic_commission_history add column if not exists mechanic_id integer;
+  alter table public.mechanic_commission_history add column if not exists commission_percent numeric(5,2);
+  alter table public.mechanic_commission_history add column if not exists effective_date date;
+  alter table public.mechanic_commission_history add column if not exists date_created timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.mechanic_list add column if not exists id integer;
+  alter table public.mechanic_list add column if not exists firstname character varying(250);
+  alter table public.mechanic_list add column if not exists middlename text;
+  alter table public.mechanic_list add column if not exists lastname character varying(250);
+  alter table public.mechanic_list add column if not exists contact character varying(50);
+  alter table public.mechanic_list add column if not exists designation character varying(100) DEFAULT 'Mechanic'::character varying;
+  alter table public.mechanic_list add column if not exists daily_salary numeric(12,2) DEFAULT 0.00;
+  alter table public.mechanic_list add column if not exists avatar character varying(255) DEFAULT 'default-avatar.jpg'::character varying;
+  alter table public.mechanic_list add column if not exists commission_percent numeric(5,2) DEFAULT 0.00;
+  alter table public.mechanic_list add column if not exists status smallint DEFAULT 1 NOT NULL;
+  alter table public.mechanic_list add column if not exists delete_flag smallint DEFAULT 0 NOT NULL;
+  alter table public.mechanic_list add column if not exists date_added timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL;
+  alter table public.mechanic_list add column if not exists date_updated timestamp with time zone DEFAULT CURRENT_TIMESTAMP;
+  alter table public.mechanic_list add column if not exists salary_per_day numeric(10,2) DEFAULT 0.00 NOT NULL;
+  alter table public.mechanic_list add column if not exists image_path text;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.mechanic_salary_history add column if not exists id integer;
+  alter table public.mechanic_salary_history add column if not exists mechanic_id integer;
+  alter table public.mechanic_salary_history add column if not exists salary numeric(12,2) DEFAULT 0.00 NOT NULL;
+  alter table public.mechanic_salary_history add column if not exists effective_date date;
+  alter table public.mechanic_salary_history add column if not exists date_created timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.message_list add column if not exists id integer;
+  alter table public.message_list add column if not exists fullname text;
+  alter table public.message_list add column if not exists contact text;
+  alter table public.message_list add column if not exists email text;
+  alter table public.message_list add column if not exists message text;
+  alter table public.message_list add column if not exists status smallint DEFAULT 0 NOT NULL;
+  alter table public.message_list add column if not exists date_created timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.payment_reminders add column if not exists id bigint;
+  alter table public.payment_reminders add column if not exists client_id bigint;
+  alter table public.payment_reminders add column if not exists amount_due numeric(15,2) DEFAULT 0 NOT NULL;
+  alter table public.payment_reminders add column if not exists reminder_date timestamp with time zone DEFAULT now() NOT NULL;
+  alter table public.payment_reminders add column if not exists channel character varying(50) DEFAULT 'System Alert'::character varying;
+  alter table public.payment_reminders add column if not exists status character varying(50) DEFAULT 'Sent'::character varying;
+  alter table public.payment_reminders add column if not exists remarks text;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.product_list add column if not exists id integer;
+  alter table public.product_list add column if not exists name text;
+  alter table public.product_list add column if not exists description text;
+  alter table public.product_list add column if not exists cost_price numeric(15,2) DEFAULT 0 NOT NULL;
+  alter table public.product_list add column if not exists price numeric(15,2) DEFAULT 0 NOT NULL;
+  alter table public.product_list add column if not exists image_path text;
+  alter table public.product_list add column if not exists status smallint DEFAULT 1 NOT NULL;
+  alter table public.product_list add column if not exists delete_flag smallint DEFAULT 0 NOT NULL;
+  alter table public.product_list add column if not exists date_created timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL;
+  alter table public.product_list add column if not exists date_updated timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL;
+  alter table public.product_list add column if not exists hsn character varying(20) DEFAULT ''::character varying NOT NULL;
+  alter table public.product_list add column if not exists alert_quantity integer DEFAULT 0 NOT NULL;
+  alter table public.product_list add column if not exists barcode character varying(100) DEFAULT NULL::character varying;
+  alter table public.product_list add column if not exists place_zone text;
+  alter table public.product_list add column if not exists place_rack text;
+  alter table public.product_list add column if not exists place_bin text;
+  alter table public.product_list add column if not exists place_box text;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.profiles add column if not exists id uuid;
+  alter table public.profiles add column if not exists full_name text;
+  alter table public.profiles add column if not exists role text DEFAULT 'staff'::text;
+  alter table public.profiles add column if not exists avatar_url text;
+  alter table public.profiles add column if not exists updated_at timestamp with time zone DEFAULT now();
+  alter table public.profiles add column if not exists mechanic_id bigint;
+  alter table public.profiles add column if not exists email text;
+  alter table public.profiles add column if not exists date_updated timestamp with time zone DEFAULT now();
+  alter table public.profiles add column if not exists client_id bigint;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.user_presence add column if not exists user_id uuid;
+  alter table public.user_presence add column if not exists status text DEFAULT 'offline'::text;
+  alter table public.user_presence add column if not exists last_seen timestamptz DEFAULT now();
+  alter table public.user_presence add column if not exists updated_at timestamptz DEFAULT now();
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.messages add column if not exists id bigint;
+  alter table public.messages add column if not exists sender_id uuid;
+  alter table public.messages add column if not exists recipient_id uuid;
+  alter table public.messages add column if not exists content text;
+  alter table public.messages add column if not exists read_at timestamptz;
+  alter table public.messages add column if not exists created_at timestamptz DEFAULT now();
+  alter table public.messages add column if not exists delivered_at timestamptz;
+  alter table public.messages add column if not exists media_url text;
+  alter table public.messages add column if not exists media_type text;
+  alter table public.messages add column if not exists media_name text;
+  alter table public.messages add column if not exists deleted_at timestamptz;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.service_list add column if not exists id integer;
+  alter table public.service_list add column if not exists name text;
+  alter table public.service_list add column if not exists description text;
+  alter table public.service_list add column if not exists price numeric(12,2) DEFAULT 0.00 NOT NULL;
+  alter table public.service_list add column if not exists status smallint DEFAULT 1 NOT NULL;
+  alter table public.service_list add column if not exists delete_flag smallint DEFAULT 0 NOT NULL;
+  alter table public.service_list add column if not exists date_created timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL;
+  alter table public.service_list add column if not exists date_updated timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL;
+  alter table public.service_list add column if not exists hsn character varying(20) DEFAULT ''::character varying NOT NULL;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.spare_supplier add column if not exists spare_id bigint;
+  alter table public.spare_supplier add column if not exists supplier_id bigint;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.suppliers add column if not exists id bigint;
+  alter table public.suppliers add column if not exists name text DEFAULT ''::text NOT NULL;
+  alter table public.suppliers add column if not exists contact text DEFAULT ''::text NOT NULL;
+  alter table public.suppliers add column if not exists email text DEFAULT ''::text NOT NULL;
+  alter table public.suppliers add column if not exists address text DEFAULT ''::text NOT NULL;
+  alter table public.suppliers add column if not exists status bigint DEFAULT 1 NOT NULL;
+  alter table public.suppliers add column if not exists delete_flag bigint DEFAULT 0 NOT NULL;
+  alter table public.suppliers add column if not exists date_created timestamp with time zone DEFAULT now() NOT NULL;
+  alter table public.suppliers add column if not exists date_updated timestamp with time zone DEFAULT now() NOT NULL;
+  alter table public.suppliers add column if not exists photo_url text DEFAULT ''::text NOT NULL;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.system_info add column if not exists id integer;
+  alter table public.system_info add column if not exists meta_field text;
+  alter table public.system_info add column if not exists meta_value text;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.transaction_images add column if not exists id integer;
+  alter table public.transaction_images add column if not exists transaction_id integer;
+  alter table public.transaction_images add column if not exists image_path character varying(255);
+  alter table public.transaction_images add column if not exists date_created timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.transaction_list add column if not exists id integer;
+  alter table public.transaction_list add column if not exists user_id integer;
+  alter table public.transaction_list add column if not exists mechanic_id integer;
+  alter table public.transaction_list add column if not exists code character varying(100);
+  alter table public.transaction_list add column if not exists job_id character varying(20) DEFAULT NULL::character varying;
+  alter table public.transaction_list add column if not exists client_name text;
+  alter table public.transaction_list add column if not exists fault text;
+  alter table public.transaction_list add column if not exists remark text;
+  alter table public.transaction_list add column if not exists item text;
+  alter table public.transaction_list add column if not exists uniq_id text;
+  alter table public.transaction_list add column if not exists amount numeric(15,2) DEFAULT 0 NOT NULL;
+  alter table public.transaction_list add column if not exists mechanic_amount numeric(12,2) DEFAULT 0 NOT NULL;
+  alter table public.transaction_list add column if not exists mechanic_commission_amount numeric(12,2) DEFAULT 0;
+  alter table public.transaction_list add column if not exists del_status smallint DEFAULT 0 NOT NULL;
+  alter table public.transaction_list add column if not exists status smallint DEFAULT 0 NOT NULL;
+  alter table public.transaction_list add column if not exists date_created timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL;
+  alter table public.transaction_list add column if not exists date_updated timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL;
+  alter table public.transaction_list add column if not exists date_completed timestamp with time zone;
+  alter table public.transaction_list add column if not exists location_id integer;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.transaction_products add column if not exists transaction_id integer;
+  alter table public.transaction_products add column if not exists product_id integer;
+  alter table public.transaction_products add column if not exists product_name text;
+  alter table public.transaction_products add column if not exists qty integer DEFAULT 0 NOT NULL;
+  alter table public.transaction_products add column if not exists price numeric(12,2) DEFAULT 0.00 NOT NULL;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.transaction_services add column if not exists transaction_id integer;
+  alter table public.transaction_services add column if not exists service_id integer;
+  alter table public.transaction_services add column if not exists service_name text;
+  alter table public.transaction_services add column if not exists price numeric(12,2) DEFAULT 0.00 NOT NULL;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.users add column if not exists id integer;
+  alter table public.users add column if not exists firstname character varying(250);
+  alter table public.users add column if not exists lastname character varying(250);
+  alter table public.users add column if not exists username character varying(100);
+  alter table public.users add column if not exists password character varying(255);
+  alter table public.users add column if not exists avatar text;
+  alter table public.users add column if not exists last_login timestamp with time zone;
+  alter table public.users add column if not exists type smallint DEFAULT 0 NOT NULL;
+  alter table public.users add column if not exists mechanic_id integer;
+  alter table public.users add column if not exists date_added timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL;
+  alter table public.users add column if not exists date_updated timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.wp_template_history add column if not exists id bigint;
+  alter table public.wp_template_history add column if not exists template_key text DEFAULT ''::text NOT NULL;
+  alter table public.wp_template_history add column if not exists action text DEFAULT ''::text NOT NULL;
+  alter table public.wp_template_history add column if not exists old_value text;
+  alter table public.wp_template_history add column if not exists new_value text;
+  alter table public.wp_template_history add column if not exists changed_by text DEFAULT ''::text NOT NULL;
+  alter table public.wp_template_history add column if not exists changed_at timestamp with time zone DEFAULT now() NOT NULL;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.location_zones add column if not exists id integer;
+  alter table public.location_zones add column if not exists name text;
+  alter table public.location_zones add column if not exists status int NOT NULL DEFAULT 1;
+  alter table public.location_zones add column if not exists delete_flag int NOT NULL DEFAULT 0;
+  alter table public.location_zones add column if not exists created_at timestamptz DEFAULT now();
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.location_racks add column if not exists id integer;
+  alter table public.location_racks add column if not exists zone_id integer;
+  alter table public.location_racks add column if not exists name text;
+  alter table public.location_racks add column if not exists status int NOT NULL DEFAULT 1;
+  alter table public.location_racks add column if not exists delete_flag int NOT NULL DEFAULT 0;
+  alter table public.location_racks add column if not exists created_at timestamptz DEFAULT now();
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.location_bins add column if not exists id integer;
+  alter table public.location_bins add column if not exists rack_id integer;
+  alter table public.location_bins add column if not exists name text;
+  alter table public.location_bins add column if not exists status int NOT NULL DEFAULT 1;
+  alter table public.location_bins add column if not exists delete_flag int NOT NULL DEFAULT 0;
+  alter table public.location_bins add column if not exists created_at timestamptz DEFAULT now();
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.location_boxes add column if not exists id integer;
+  alter table public.location_boxes add column if not exists bin_id integer;
+  alter table public.location_boxes add column if not exists name text;
+  alter table public.location_boxes add column if not exists status int NOT NULL DEFAULT 1;
+  alter table public.location_boxes add column if not exists delete_flag int NOT NULL DEFAULT 0;
+  alter table public.location_boxes add column if not exists created_at timestamptz DEFAULT now();
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.locations add column if not exists id integer;
+  alter table public.locations add column if not exists zone text;
+  alter table public.locations add column if not exists rack text NOT NULL DEFAULT ''::text;
+  alter table public.locations add column if not exists bin text NOT NULL DEFAULT ''::text;
+  alter table public.locations add column if not exists box text NOT NULL DEFAULT ''::text;
+  alter table public.locations add column if not exists label text;
+  alter table public.locations add column if not exists status int NOT NULL DEFAULT 1;
+  alter table public.locations add column if not exists delete_flag int NOT NULL DEFAULT 0;
+  alter table public.locations add column if not exists created_at timestamptz DEFAULT now();
+  alter table public.locations add column if not exists code text;
+  alter table public.locations add column if not exists zone_id integer;
+  alter table public.locations add column if not exists rack_id integer;
+  alter table public.locations add column if not exists bin_id integer;
+  alter table public.locations add column if not exists box_id integer;
+  alter table public.locations add column if not exists kind text NOT NULL DEFAULT 'inventory'::text;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.product_locations add column if not exists product_id integer;
+  alter table public.product_locations add column if not exists location_id integer;
+  alter table public.product_locations add column if not exists created_at timestamptz DEFAULT now();
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.purchase_order_items add column if not exists id bigint;
+  alter table public.purchase_order_items add column if not exists purchase_order_id bigint;
+  alter table public.purchase_order_items add column if not exists product_id bigint;
+  alter table public.purchase_order_items add column if not exists qty_ordered integer DEFAULT 0 NOT NULL;
+  alter table public.purchase_order_items add column if not exists qty_received integer DEFAULT 0 NOT NULL;
+  alter table public.purchase_order_items add column if not exists unit_cost numeric(12,2) DEFAULT 0 NOT NULL;
+  alter table public.purchase_order_items add column if not exists date_created timestamp with time zone DEFAULT now() NOT NULL;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.purchase_orders add column if not exists id bigint;
+  alter table public.purchase_orders add column if not exists po_code text;
+  alter table public.purchase_orders add column if not exists supplier_id bigint;
+  alter table public.purchase_orders add column if not exists status text DEFAULT 'pending'::text NOT NULL;
+  alter table public.purchase_orders add column if not exists expected_date date;
+  alter table public.purchase_orders add column if not exists notes text DEFAULT ''::text;
+  alter table public.purchase_orders add column if not exists total_amount numeric(12,2) DEFAULT 0 NOT NULL;
+  alter table public.purchase_orders add column if not exists received_date date;
+  alter table public.purchase_orders add column if not exists date_created timestamp with time zone DEFAULT now() NOT NULL;
+  alter table public.purchase_orders add column if not exists date_updated timestamp with time zone DEFAULT now() NOT NULL;
+
+  -- PO pricing flow: expenses (freight/handling) total — received at receive time
+  alter table public.purchase_orders add column if not exists expenses numeric(12,2) default 0;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.push_subscriptions add column if not exists id bigint;
+  alter table public.push_subscriptions add column if not exists user_id uuid;
+  alter table public.push_subscriptions add column if not exists endpoint text;
+  alter table public.push_subscriptions add column if not exists p256dh text DEFAULT ''::text NOT NULL;
+  alter table public.push_subscriptions add column if not exists auth text DEFAULT ''::text NOT NULL;
+  alter table public.push_subscriptions add column if not exists device_name text DEFAULT ''::text;
+  alter table public.push_subscriptions add column if not exists enabled boolean DEFAULT true NOT NULL;
+  alter table public.push_subscriptions add column if not exists date_created timestamp with time zone DEFAULT now() NOT NULL;
+  alter table public.push_subscriptions add column if not exists date_updated timestamp with time zone DEFAULT now() NOT NULL;
+exception when duplicate_column then null; end $$;
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- SEQUENCES (28 CREATE SEQUENCE) + OWNED BY + id DEFAULT wiring (step 7)
+--   CREATE SEQUENCE IF NOT EXISTS (params verbatim); `OWNER TO` DROP.
+--   OWNED BY aur SET DEFAULT nextval() idempotent hain (safe re-run).
+--   setval() lines intentionally DROP — sirf fresh-DB ke liye the, aur app ke
+--   paas reset_sequence() hai; live DB pe sequences ka data hum nahi chhedte.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE SEQUENCE IF NOT EXISTS public.advance_payments_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+ALTER SEQUENCE public.advance_payments_id_seq OWNED BY public.advance_payments.id;
+ALTER TABLE ONLY public.advance_payments ALTER COLUMN id SET DEFAULT nextval('public.advance_payments_id_seq'::regclass);
+
+CREATE SEQUENCE IF NOT EXISTS public.attendance_list_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+ALTER SEQUENCE public.attendance_list_id_seq OWNED BY public.attendance_list.id;
+ALTER TABLE ONLY public.attendance_list ALTER COLUMN id SET DEFAULT nextval('public.attendance_list_id_seq'::regclass);
+
+CREATE SEQUENCE IF NOT EXISTS public.client_list_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+ALTER SEQUENCE public.client_list_id_seq OWNED BY public.client_list.id;
+ALTER TABLE ONLY public.client_list ALTER COLUMN id SET DEFAULT nextval('public.client_list_id_seq'::regclass);
+
+CREATE SEQUENCE IF NOT EXISTS public.client_loans_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+ALTER SEQUENCE public.client_loans_id_seq OWNED BY public.client_loans.id;
+ALTER TABLE ONLY public.client_loans ALTER COLUMN id SET DEFAULT nextval('public.client_loans_id_seq'::regclass);
+
+CREATE SEQUENCE IF NOT EXISTS public.client_payments_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+ALTER SEQUENCE public.client_payments_id_seq OWNED BY public.client_payments.id;
+ALTER TABLE ONLY public.client_payments ALTER COLUMN id SET DEFAULT nextval('public.client_payments_id_seq'::regclass);
+
+CREATE SEQUENCE IF NOT EXISTS public.direct_sale_items_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+ALTER SEQUENCE public.direct_sale_items_id_seq OWNED BY public.direct_sale_items.id;
+ALTER TABLE ONLY public.direct_sale_items ALTER COLUMN id SET DEFAULT nextval('public.direct_sale_items_id_seq'::regclass);
+
+CREATE SEQUENCE IF NOT EXISTS public.direct_sales_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+ALTER SEQUENCE public.direct_sales_id_seq OWNED BY public.direct_sales.id;
+ALTER TABLE ONLY public.direct_sales ALTER COLUMN id SET DEFAULT nextval('public.direct_sales_id_seq'::regclass);
+
+CREATE SEQUENCE IF NOT EXISTS public.expense_list_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+ALTER SEQUENCE public.expense_list_id_seq OWNED BY public.expense_list.id;
+ALTER TABLE ONLY public.expense_list ALTER COLUMN id SET DEFAULT nextval('public.expense_list_id_seq'::regclass);
+
+CREATE SEQUENCE IF NOT EXISTS public.inventory_list_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+ALTER SEQUENCE public.inventory_list_id_seq OWNED BY public.inventory_list.id;
+ALTER TABLE ONLY public.inventory_list ALTER COLUMN id SET DEFAULT nextval('public.inventory_list_id_seq'::regclass);
+
+CREATE SEQUENCE IF NOT EXISTS public.job_id_counter_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+ALTER SEQUENCE public.job_id_counter_id_seq OWNED BY public.job_id_counter.id;
+ALTER TABLE ONLY public.job_id_counter ALTER COLUMN id SET DEFAULT nextval('public.job_id_counter_id_seq'::regclass);
+
+CREATE SEQUENCE IF NOT EXISTS public.lender_list_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+ALTER SEQUENCE public.lender_list_id_seq OWNED BY public.lender_list.id;
+ALTER TABLE ONLY public.lender_list ALTER COLUMN id SET DEFAULT nextval('public.lender_list_id_seq'::regclass);
+
+CREATE SEQUENCE IF NOT EXISTS public.loan_payments_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+ALTER SEQUENCE public.loan_payments_id_seq OWNED BY public.loan_payments.id;
+ALTER TABLE ONLY public.loan_payments ALTER COLUMN id SET DEFAULT nextval('public.loan_payments_id_seq'::regclass);
+
+CREATE SEQUENCE IF NOT EXISTS public.mechanic_commission_history_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+ALTER SEQUENCE public.mechanic_commission_history_id_seq OWNED BY public.mechanic_commission_history.id;
+ALTER TABLE ONLY public.mechanic_commission_history ALTER COLUMN id SET DEFAULT nextval('public.mechanic_commission_history_id_seq'::regclass);
+
+CREATE SEQUENCE IF NOT EXISTS public.mechanic_list_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+ALTER SEQUENCE public.mechanic_list_id_seq OWNED BY public.mechanic_list.id;
+ALTER TABLE ONLY public.mechanic_list ALTER COLUMN id SET DEFAULT nextval('public.mechanic_list_id_seq'::regclass);
+
+CREATE SEQUENCE IF NOT EXISTS public.mechanic_salary_history_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+ALTER SEQUENCE public.mechanic_salary_history_id_seq OWNED BY public.mechanic_salary_history.id;
+ALTER TABLE ONLY public.mechanic_salary_history ALTER COLUMN id SET DEFAULT nextval('public.mechanic_salary_history_id_seq'::regclass);
+
+CREATE SEQUENCE IF NOT EXISTS public.message_list_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+ALTER SEQUENCE public.message_list_id_seq OWNED BY public.message_list.id;
+ALTER TABLE ONLY public.message_list ALTER COLUMN id SET DEFAULT nextval('public.message_list_id_seq'::regclass);
+
+CREATE SEQUENCE IF NOT EXISTS public.payment_reminders_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+ALTER SEQUENCE public.payment_reminders_id_seq OWNED BY public.payment_reminders.id;
+ALTER TABLE ONLY public.payment_reminders ALTER COLUMN id SET DEFAULT nextval('public.payment_reminders_id_seq'::regclass);
+
+CREATE SEQUENCE IF NOT EXISTS public.product_list_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+ALTER SEQUENCE public.product_list_id_seq OWNED BY public.product_list.id;
+ALTER TABLE ONLY public.product_list ALTER COLUMN id SET DEFAULT nextval('public.product_list_id_seq'::regclass);
+
+CREATE SEQUENCE IF NOT EXISTS public.service_list_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+ALTER SEQUENCE public.service_list_id_seq OWNED BY public.service_list.id;
+ALTER TABLE ONLY public.service_list ALTER COLUMN id SET DEFAULT nextval('public.service_list_id_seq'::regclass);
+
+CREATE SEQUENCE IF NOT EXISTS public.system_info_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+ALTER SEQUENCE public.system_info_id_seq OWNED BY public.system_info.id;
+ALTER TABLE ONLY public.system_info ALTER COLUMN id SET DEFAULT nextval('public.system_info_id_seq'::regclass);
+
+CREATE SEQUENCE IF NOT EXISTS public.transaction_images_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+ALTER SEQUENCE public.transaction_images_id_seq OWNED BY public.transaction_images.id;
+ALTER TABLE ONLY public.transaction_images ALTER COLUMN id SET DEFAULT nextval('public.transaction_images_id_seq'::regclass);
+
+CREATE SEQUENCE IF NOT EXISTS public.transaction_list_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+ALTER SEQUENCE public.transaction_list_id_seq OWNED BY public.transaction_list.id;
+ALTER TABLE ONLY public.transaction_list ALTER COLUMN id SET DEFAULT nextval('public.transaction_list_id_seq'::regclass);
+
+CREATE SEQUENCE IF NOT EXISTS public.users_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+ALTER SEQUENCE public.users_id_seq OWNED BY public.users.id;
+ALTER TABLE ONLY public.users ALTER COLUMN id SET DEFAULT nextval('public.users_id_seq'::regclass);
+
+CREATE SEQUENCE IF NOT EXISTS public.location_zones_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+ALTER SEQUENCE public.location_zones_id_seq OWNED BY public.location_zones.id;
+ALTER TABLE ONLY public.location_zones ALTER COLUMN id SET DEFAULT nextval('public.location_zones_id_seq'::regclass);
+
+CREATE SEQUENCE IF NOT EXISTS public.location_racks_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+ALTER SEQUENCE public.location_racks_id_seq OWNED BY public.location_racks.id;
+ALTER TABLE ONLY public.location_racks ALTER COLUMN id SET DEFAULT nextval('public.location_racks_id_seq'::regclass);
+
+CREATE SEQUENCE IF NOT EXISTS public.location_bins_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+ALTER SEQUENCE public.location_bins_id_seq OWNED BY public.location_bins.id;
+ALTER TABLE ONLY public.location_bins ALTER COLUMN id SET DEFAULT nextval('public.location_bins_id_seq'::regclass);
+
+CREATE SEQUENCE IF NOT EXISTS public.location_boxes_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+ALTER SEQUENCE public.location_boxes_id_seq OWNED BY public.location_boxes.id;
+ALTER TABLE ONLY public.location_boxes ALTER COLUMN id SET DEFAULT nextval('public.location_boxes_id_seq'::regclass);
+
+CREATE SEQUENCE IF NOT EXISTS public.locations_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+ALTER SEQUENCE public.locations_id_seq OWNED BY public.locations.id;
+ALTER TABLE ONLY public.locations ALTER COLUMN id SET DEFAULT nextval('public.locations_id_seq'::regclass);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- IDENTITY COLUMNS (7) — `ADD GENERATED ... AS IDENTITY` idempotent NAHI hai,
+-- isliye har identity-grant pg_attribute.attidentity check se guard kiya hai.
+--   (6x GENERATED BY DEFAULT + 1x GENERATED ALWAYS [login_throttle])
+-- ═══════════════════════════════════════════════════════════════════════════
+
+do $$ begin
+  if not exists (select 1 from pg_attribute a where a.attrelid='public.activity_logs'::regclass and a.attname='id' and a.attidentity<>'') then
+    alter table public.activity_logs alter column id add generated by default as identity (SEQUENCE NAME public.activity_logs_id_seq START WITH 1 INCREMENT BY 1 NO MINVALUE NO MAXVALUE CACHE 1);
+  end if;
+end $$;
+
+do $$ begin
+  if not exists (select 1 from pg_attribute a where a.attrelid='public.login_throttle'::regclass and a.attname='id' and a.attidentity<>'') then
+    alter table public.login_throttle alter column id add generated always as identity (SEQUENCE NAME public.login_throttle_id_seq START WITH 1 INCREMENT BY 1 NO MINVALUE NO MAXVALUE CACHE 1);
+  end if;
+end $$;
+
+do $$ begin
+  if not exists (select 1 from pg_attribute a where a.attrelid='public.suppliers'::regclass and a.attname='id' and a.attidentity<>'') then
+    alter table public.suppliers alter column id add generated by default as identity (SEQUENCE NAME public.suppliers_id_seq START WITH 1 INCREMENT BY 1 NO MINVALUE NO MAXVALUE CACHE 1);
+  end if;
+end $$;
+
+do $$ begin
+  if not exists (select 1 from pg_attribute a where a.attrelid='public.purchase_order_items'::regclass and a.attname='id' and a.attidentity<>'') then
+    alter table public.purchase_order_items alter column id add generated by default as identity (SEQUENCE NAME public.purchase_order_items_id_seq START WITH 1 INCREMENT BY 1 NO MINVALUE NO MAXVALUE CACHE 1);
+  end if;
+end $$;
+
+do $$ begin
+  if not exists (select 1 from pg_attribute a where a.attrelid='public.purchase_orders'::regclass and a.attname='id' and a.attidentity<>'') then
+    alter table public.purchase_orders alter column id add generated by default as identity (SEQUENCE NAME public.purchase_orders_id_seq START WITH 1 INCREMENT BY 1 NO MINVALUE NO MAXVALUE CACHE 1);
+  end if;
+end $$;
+
+do $$ begin
+  if not exists (select 1 from pg_attribute a where a.attrelid='public.push_subscriptions'::regclass and a.attname='id' and a.attidentity<>'') then
+    alter table public.push_subscriptions alter column id add generated by default as identity (SEQUENCE NAME public.push_subscriptions_id_seq START WITH 1 INCREMENT BY 1 NO MINVALUE NO MAXVALUE CACHE 1);
+  end if;
+end $$;
+
+do $$ begin
+  if not exists (select 1 from pg_attribute a where a.attrelid='public.wp_template_history'::regclass and a.attname='id' and a.attidentity<>'') then
+    alter table public.wp_template_history alter column id add generated by default as identity (SEQUENCE NAME public.wp_template_history_id_seq START WITH 1 INCREMENT BY 1 NO MINVALUE NO MAXVALUE CACHE 1);
+  end if;
+end $$;
+
+do $$ begin
+  if not exists (select 1 from pg_attribute a where a.attrelid='public.messages'::regclass and a.attname='id' and a.attidentity<>'') then
+    alter table public.messages alter column id add generated by default as identity;
+  end if;
+end $$;
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- FUNCTIONS (19) — CREATE OR REPLACE FUNCTION (signatures/bodies verbatim).
+-- NOTE: create-or-replace return type nahi badal sakta, par signatures verbatim
+-- preserve hone se ye safe hai. `ALTER FUNCTION ... OWNER` DROP kar diya hai.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE OR REPLACE FUNCTION public.get_transactions_with_client_data(date_from date DEFAULT NULL::date, date_to date DEFAULT NULL::date) RETURNS TABLE(id integer, job_id character varying, code character varying, client_name integer, item text, fault text, uniq_id character varying, amount numeric, status integer, date_created timestamp with time zone, date_updated timestamp with time zone, date_completed timestamp with time zone, del_status integer, client_firstname character varying, client_middlename character varying, client_lastname character varying, client_contact character varying, client_opening_balance numeric, total_billed numeric, total_paid numeric, total_sale numeric)
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        t.id,
+        t.job_id,
+        t.code,
+        t.client_name::INT,                     -- cast text to int (ensure all values are numeric)
+        t.item,
+        t.fault,
+        t.uniq_id,
+        t.amount,
+        t.status,
+        t.date_created,
+        t.date_updated,
+        t.date_completed,
+        t.del_status,
+        c.firstname,
+        c.middlename,
+        c.lastname,
+        c.contact,
+        COALESCE(c.opening_balance, 0) AS client_opening_balance,
+        -- total billed (status = 5)
+        (SELECT COALESCE(SUM(amount), 0) FROM transaction_list WHERE client_name = c.id::text AND status = 5) AS total_billed,
+        -- total paid (payments + discount)
+        (SELECT COALESCE(SUM(amount + COALESCE(discount, 0)), 0) FROM client_payments WHERE client_id = c.id) AS total_paid,
+        -- total sales from direct_sales
+        (SELECT COALESCE(SUM(total_amount), 0) FROM direct_sales WHERE client_id = c.id) AS total_sale
+    FROM transaction_list t
+    INNER JOIN client_list c ON t.client_name::INT = c.id   -- join on integer after casting
+    WHERE t.del_status = 0
+      AND (date_from IS NULL OR t.date_created >= date_from::TIMESTAMPTZ)
+      AND (date_to IS NULL OR t.date_created <= (date_to::TIMESTAMPTZ + INTERVAL '1 day' - INTERVAL '1 second'))
+    ORDER BY t.job_id DESC, t.date_created DESC;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.handle_new_user() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    AS $$
+BEGIN
+  INSERT INTO public.profiles (id, full_name, email, role)
+  VALUES (
+    NEW.id,
+    COALESCE(
+      NEW.raw_user_meta_data->>'full_name',
+      NEW.raw_user_meta_data->>'name',
+      split_part(NEW.email, '@', 1)
+    ),
+    NEW.email,
+    'staff'
+  );
+  RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.prevent_role_escalation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'public'
+    AS $$
+begin
+  -- Browser clients (anon / authenticated JWT) sirf role='staff' set kar sakte hain.
+  -- Service-role (admin APIs) is check se unaffected hai.
+  if auth.role() in ('anon', 'authenticated') and new.role is distinct from 'staff' then
+    raise exception 'Role escalation not allowed';
+  end if;
+  return new;
+end;
+$$;
+
+CREATE OR REPLACE FUNCTION public.reset_sequence(table_name text) RETURNS text
+    LANGUAGE plpgsql SECURITY DEFINER
+    AS $$
+DECLARE
+  seq_name text;
+  max_id   bigint;
+  new_val  bigint;
+BEGIN
+  -- Is table ke 'id' column ki sequence dhundo
+  SELECT pg_get_serial_sequence(table_name, 'id') INTO seq_name;
+
+  IF seq_name IS NULL THEN
+    RETURN 'SKIP: ' || table_name || ' (no sequence found)';
+  END IF;
+
+  -- Current max ID fetch karo
+  EXECUTE format('SELECT COALESCE(MAX(id), 0) FROM %I', table_name) INTO max_id;
+
+  new_val := max_id + 1;
+
+  -- Sequence reset karo
+  PERFORM setval(seq_name, new_val, false);
+
+  RETURN 'OK: ' || table_name || ' → next_id = ' || new_val;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.update_date_updated() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    NEW.date_updated = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.get_dashboard_stats(p_today_start text, p_today_end text) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER STABLE
+    AS $$
+declare
+  result jsonb;
+begin
+  select jsonb_build_object(
+    'totalJobs',       (select count(*) from public.transaction_list where del_status = 0),
+    'pendingJobs',     (select count(*) from public.transaction_list where del_status = 0 and status = 0),
+    'inProgressJobs',  (select count(*) from public.transaction_list where del_status = 0 and status = 1),
+    'finishedJobs',    (select count(*) from public.transaction_list where del_status = 0 and status = 2),
+    'paidJobs',        (select count(*) from public.transaction_list where del_status = 0 and status = 3),
+    'cancelledJobs',   (select count(*) from public.transaction_list where del_status = 0 and status = 4),
+    'deliveredJobs',   (select count(*) from public.transaction_list where del_status = 0 and status = 5),
+    'totalClients',    (select count(*) from public.client_list where delete_flag = 0),
+    'totalMechanics',  (select count(*) from public.mechanic_list where delete_flag = 0 and status = 1),
+    'todayRepair',     (select coalesce(sum(amount), 0) from public.transaction_list where status = 5 and del_status = 0 and date_completed >= p_today_start::timestamptz and date_completed <= p_today_end::timestamptz),
+    'todayDirect',     (select coalesce(sum(total_amount), 0) from public.direct_sales where date_created >= p_today_start::timestamptz and date_created <= p_today_end::timestamptz)
+  ) into result;
+  return result;
+end;
+$$;
+
+CREATE OR REPLACE FUNCTION public.get_financial_summary(p_from text, p_to text) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER STABLE
+    AS $$
+declare
+  result jsonb;
+  v_from timestamptz;
+  v_to   timestamptz;
+  v_repair_inc  numeric;
+  v_direct_inc  numeric;
+  v_total_sales numeric;
+  v_parts_trans numeric;
+  v_parts_direct numeric;
+  v_parts_cost  numeric;
+  v_discounts   numeric;
+  v_salary      numeric;
+  v_loan_paid   numeric;
+  v_expenses    numeric;
+  v_tx_ids      int[];
+  v_ds_ids      int[];
+begin
+  v_from := (p_from || 'T00:00:00+05:30')::timestamptz;
+  v_to   := (p_to || 'T23:59:59+05:30')::timestamptz;
+
+  select coalesce(sum(amount), 0) into v_repair_inc
+    from public.transaction_list
+   where status = 5 and del_status = 0
+     and date_completed >= v_from and date_completed <= v_to;
+
+  select coalesce(sum(total_amount), 0) into v_direct_inc
+    from public.direct_sales
+   where date_created >= v_from and date_created <= v_to;
+
+  v_total_sales := v_repair_inc + v_direct_inc;
+
+  select array_agg(id) into v_tx_ids
+    from public.transaction_list
+   where status = 5 and del_status = 0
+     and date_completed >= v_from and date_completed <= v_to;
+
+  select array_agg(id) into v_ds_ids
+    from public.direct_sales
+   where date_created >= v_from and date_created <= v_to;
+
+  select coalesce(sum(
+    tp.qty * case
+      when p.cost_price is not null and p.cost_price > 0 then p.cost_price
+      else tp.price * 0.9
+    end
+  ), 0) into v_parts_trans
+  from public.transaction_products tp
+  left join public.product_list p on p.id = tp.product_id
+  where v_tx_ids is not null and tp.transaction_id = any(v_tx_ids);
+
+  select coalesce(sum(
+    di.qty * case
+      when p.cost_price is not null and p.cost_price > 0 then p.cost_price
+      else di.price * 0.9
+    end
+  ), 0) into v_parts_direct
+  from public.direct_sale_items di
+  left join public.product_list p on p.id = di.product_id
+  where v_ds_ids is not null and di.sale_id = any(v_ds_ids);
+
+  v_parts_cost := v_parts_trans + v_parts_direct;
+
+  select coalesce(sum(discount), 0) into v_discounts
+    from public.client_payments
+   where payment_date >= p_from and payment_date <= p_to;
+
+  select coalesce(sum(
+    case
+      when a.status = 1 then m.daily_salary
+      when a.status = 3 then m.daily_salary / 2
+      else 0
+    end
+  ), 0) into v_salary
+  from public.attendance_list a
+  join public.mechanic_list m on m.id = a.mechanic_id
+  where a.curr_date >= p_from and a.curr_date <= p_to
+    and a.status in (1, 3);
+
+  select coalesce(sum(amount_paid), 0) into v_loan_paid
+    from public.loan_payments
+   where payment_date >= p_from and payment_date <= p_to;
+
+  select coalesce(sum(amount), 0) into v_expenses
+    from public.expense_list
+   where date_created >= v_from and date_created <= v_to;
+
+  result := jsonb_build_object(
+    'totalSales',   v_total_sales,
+    'partsCost',    v_parts_cost,
+    'grossProfit',  v_total_sales - v_parts_cost,
+    'discounts',    v_discounts,
+    'salary',       v_salary,
+    'loanPaid',     v_loan_paid,
+    'expenses',     v_expenses,
+    'totalOutflow', v_discounts + v_salary + v_loan_paid + v_expenses,
+    'netProfit',    (v_total_sales - v_parts_cost) - (v_discounts + v_salary + v_loan_paid + v_expenses)
+  );
+
+  return result;
+end;
+$$;
+
+CREATE OR REPLACE FUNCTION public.get_monthly_revenue(p_months integer DEFAULT 12) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER STABLE
+    AS $$
+declare
+  result jsonb;
+  month_label text;
+  month_revenue numeric;
+  months_arr jsonb := '[]'::jsonb;
+  i int;
+  m_date date;
+  m_start timestamptz;
+  m_end timestamptz;
+begin
+  for i in 0 .. (p_months - 1) loop
+    m_date := date_trunc('month', current_date) - (i || ' months')::interval;
+    m_start := (date_trunc('month', m_date))::timestamptz;
+    m_end   := (date_trunc('month', m_date) + interval '1 month - 1 second')::timestamptz;
+
+    month_label := to_char(m_date, 'Mon YY');
+
+    select coalesce(sum(repair_rev + direct_rev), 0) into month_revenue
+    from (
+      select coalesce(sum(amount), 0) as repair_rev, 0 as direct_rev
+        from public.transaction_list
+       where status = 5 and del_status = 0
+         and date_completed >= m_start and date_completed <= m_end
+      union all
+      select 0 as repair_rev, coalesce(sum(total_amount), 0) as direct_rev
+        from public.direct_sales
+       where date_created >= m_start and date_created <= m_end
+    ) t;
+
+    months_arr := months_arr || jsonb_build_object(
+      'month', month_label,
+      'revenue', month_revenue
+    );
+  end loop;
+
+  result := (
+    select jsonb_agg(elem)
+    from (select elem from jsonb_array_elements(months_arr) with ordinality AS t(elem, pos) order by t.pos desc) sub
+  );
+
+  return coalesce(result, '[]'::jsonb);
+end;
+$$;
+
+CREATE OR REPLACE FUNCTION public.get_my_client_id() RETURNS bigint
+    LANGUAGE sql SECURITY DEFINER STABLE
+    SET search_path TO public
+    AS $$
+  select client_id from public.profiles where id = auth.uid();
+$$;
+
+CREATE OR REPLACE FUNCTION public.get_my_role() RETURNS text
+    LANGUAGE sql SECURITY DEFINER STABLE
+    SET search_path TO public
+    AS $$
+  select role from public.profiles where id = auth.uid();
+$$;
+
+CREATE OR REPLACE FUNCTION public.get_technician_metrics(p_from text, p_to text) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER STABLE
+    AS $$
+declare
+  result jsonb;
+  v_from date := p_from::date;
+  v_to   date := p_to::date;
+begin
+  select jsonb_agg(row_to_json(t)) into result
+  from (
+    select
+      m.id,
+      m.firstname || ' ' || coalesce(m.lastname, '') as name,
+      m.designation,
+      m.daily_salary,
+      m.commission_percent,
+      m.image_path,
+
+      coalesce(job_stats.jobs_completed, 0) as jobs_completed,
+      coalesce(job_stats.jobs_revenue, 0) as jobs_revenue,
+      coalesce(job_stats.jobs_commission, 0) as jobs_commission,
+
+      coalesce(att_stats.full_days, 0) as full_days,
+      coalesce(att_stats.half_days, 0) as half_days,
+      coalesce(att_stats.absent_days, 0) as absent_days,
+      coalesce(att_stats.total_attended, 0) as total_attended,
+      coalesce(att_stats.working_days, 0) as working_days,
+
+      coalesce(att_stats.salary_earned, 0) as salary_earned,
+
+      job_stats.avg_repair_hours
+
+    from public.mechanic_list m
+
+    left join lateral (
+      select
+        count(*) as jobs_completed,
+        coalesce(sum(t.amount), 0) as jobs_revenue,
+        coalesce(sum(t.mechanic_commission_amount), 0) as jobs_commission,
+        case when count(*) > 0
+          then round(extract(epoch from avg(t.date_completed - t.date_created)) / 3600, 1)
+          else null
+        end as avg_repair_hours
+      from public.transaction_list t
+      where t.mechanic_id = m.id
+        and t.status = 5
+        and t.del_status = 0
+        and t.date_completed >= (v_from || 'T00:00:00+05:30')::timestamptz
+        and t.date_completed <= ((v_to || 'T23:59:59+05:30')::timestamptz)
+    ) job_stats on true
+
+    left join lateral (
+      select
+        count(*) filter (where a.status = 1) as full_days,
+        count(*) filter (where a.status = 3) as half_days,
+        count(*) filter (where a.status = 2) as absent_days,
+        count(*) filter (where a.status in (1, 3)) as total_attended,
+        count(*) as working_days,
+        coalesce(sum(
+          case
+            when a.status = 1 then m.daily_salary
+            when a.status = 3 then m.daily_salary / 2
+            else 0
+          end
+        ), 0) as salary_earned
+      from public.attendance_list a
+      where a.mechanic_id = m.id
+        and a.curr_date >= v_from
+        and a.curr_date <= v_to
+    ) att_stats on true
+
+    where m.delete_flag = 0 and m.status = 1
+    order by job_stats.jobs_completed desc nulls last
+  ) t;
+
+  return coalesce(result, '[]'::jsonb);
+end;
+$$;
+
+CREATE OR REPLACE FUNCTION public.is_frontend_staff() RETURNS boolean
+    LANGUAGE sql SECURITY DEFINER STABLE
+    SET search_path TO public
+    AS $$
+  select coalesce((select role from public.profiles where id = auth.uid()), '') in ('admin', 'staff', 'developer');
+$$;
+
+CREATE OR REPLACE FUNCTION public.touch_purchase_orders() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  new.date_updated = now();
+  return new;
+end;
+$$;
+
+CREATE OR REPLACE FUNCTION public.touch_push_subscriptions() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  new.date_updated = now();
+  return new;
+end;
+$$;
+
+-- ── I1: single-source stock RPC (added 20260903; also in 20260903_inventory_single_stock_rpc.sql) ──
+CREATE OR REPLACE FUNCTION public.get_inventory_stock(
+    p_product_ids int8[] DEFAULT NULL
+) RETURNS TABLE(
+    product_id        bigint,
+    total_in          bigint,
+    total_sold_job    bigint,
+    total_sold_sale   bigint,
+    total_sold        bigint,
+    available         bigint,
+    oversold          bigint,
+    avg_purchase_cost numeric,
+    last_stock_date   date,
+    place             text
+)
+    LANGUAGE sql
+    STABLE
+    SECURITY DEFINER
+    SET search_path = public
+AS $$
+    WITH inv AS (
+        SELECT product_id, SUM(quantity) AS total_in,
+               COALESCE(NULLIF(SUM(CASE WHEN quantity > 0 THEN quantity * purchase_cost END), 0)
+                        / NULLIF(SUM(CASE WHEN quantity > 0 THEN quantity END), 0), 0) AS avg_cost,
+               MAX(stock_date) AS last_date,
+               (array_agg(place ORDER BY stock_date DESC, id DESC))[1] AS place
+        FROM public.inventory_list
+        WHERE (p_product_ids IS NULL OR product_id = ANY (p_product_ids))
+        GROUP BY product_id
+    ),
+    sold_job AS (
+        SELECT tp.product_id, SUM(tp.qty) AS qty
+        FROM public.transaction_products tp
+        JOIN public.transaction_list t ON t.id = tp.transaction_id
+        WHERE t.status <> 4
+          AND (p_product_ids IS NULL OR tp.product_id = ANY (p_product_ids))
+        GROUP BY tp.product_id
+    ),
+    sold_sale AS (
+        SELECT product_id, SUM(qty) AS qty
+        FROM public.direct_sale_items
+        WHERE (p_product_ids IS NULL OR product_id = ANY (p_product_ids))
+        GROUP BY product_id
+    ),
+    all_ids AS (
+        SELECT product_id FROM inv
+        UNION SELECT product_id FROM sold_job
+        UNION SELECT product_id FROM sold_sale
+    )
+    SELECT a.product_id,
+           COALESCE(i.total_in, 0)            AS total_in,
+           COALESCE(j.qty, 0)                 AS total_sold_job,
+           COALESCE(s.qty, 0)                 AS total_sold_sale,
+           COALESCE(j.qty, 0) + COALESCE(s.qty, 0) AS total_sold,
+           COALESCE(i.total_in, 0) - COALESCE(j.qty, 0) - COALESCE(s.qty, 0) AS available,
+           GREATEST(0, COALESCE(j.qty, 0) + COALESCE(s.qty, 0) - COALESCE(i.total_in, 0)) AS oversold,
+           COALESCE(i.avg_cost, 0)            AS avg_purchase_cost,
+           i.last_date                        AS last_stock_date,
+           i.place                            AS place
+    FROM all_ids a
+    LEFT JOIN inv  i ON i.product_id = a.product_id
+    LEFT JOIN sold_job  j ON j.product_id = a.product_id
+    LEFT JOIN sold_sale s ON s.product_id = a.product_id
+    ORDER BY a.product_id;
+$$;
+
+REVOKE ALL ON FUNCTION public.get_inventory_stock(int8[]) FROM public;
+GRANT EXECUTE ON FUNCTION public.get_inventory_stock(int8[]) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.get_inventory_stock(int8[]) TO service_role;
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- ROW LEVEL SECURITY — ENABLE (40 tables; idempotent, policies se pehle)
+--   pg_dump ne har table ke liye `ENABLE ROW LEVEL SECURITY` diya tha. Policies
+--   RLS OFF pe ignore hoti hain, isliye pehle sab tables pe RLS ENABLE karte hain.
+--   NOTE: `SET row_security = off` danger hai — deliberately DROP; RLS enforced rahegi.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+ALTER TABLE public.activity_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.advance_payments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.attendance_list ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.client_list ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.client_loans ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.client_payments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.direct_sale_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.direct_sales ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.expense_list ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.inventory_list ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.job_id_counter ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.lender_list ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.loan_payments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.login_throttle ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.mechanic_commission_history ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.mechanic_list ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.mechanic_salary_history ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.message_list ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.payment_reminders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.product_list ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.service_list ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.spare_supplier ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.suppliers ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.supplier_contacts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.system_info ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.transaction_images ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.transaction_list ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.transaction_products ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.transaction_services ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.wp_template_history ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.locations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.location_zones ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.location_racks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.location_bins ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.location_boxes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.product_locations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.purchase_orders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.purchase_order_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.push_subscriptions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.user_presence ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.messages ENABLE ROW LEVEL SECURITY;
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- TRIGGERS (8) — DROP TRIGGER IF EXISTS + CREATE TRIGGER (data-safe)
+--   Trigger functions (step d) pehle hi CREATE OR REPLACE ho chuki hain.
+--   Note: in CREATEs me identifier case source se verbatim preserve hai
+--   (PG case-sensitive identifiers tabhi jab "double-quoted" hain).
+-- ═══════════════════════════════════════════════════════════════════════════
+
+DROP TRIGGER IF EXISTS prevent_role_escalation_trigger ON public.profiles;
+CREATE TRIGGER prevent_role_escalation_trigger BEFORE INSERT OR UPDATE OF role ON public.profiles FOR EACH ROW EXECUTE FUNCTION public.prevent_role_escalation();
+
+DROP TRIGGER IF EXISTS trig_inventory_update_timestamp ON public.inventory_list;
+CREATE TRIGGER trig_inventory_update_timestamp BEFORE UPDATE ON public.inventory_list FOR EACH ROW EXECUTE FUNCTION public.update_date_updated();
+
+-- ── I6 location cleanup (20260920 fold-in): place path write-symmetry trigger ─
+-- Structured (place_zone/rack/bin/box) use par `place` = derived path auto-sync;
+-- writers jo sirf `place` set karte hain untouched. Idempotent.
+CREATE OR REPLACE FUNCTION public.inventory_sync_place_path()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF COALESCE(NEW.place_zone, '') <> ''
+     OR COALESCE(NEW.place_rack, '') <> ''
+     OR COALESCE(NEW.place_bin, '') <> ''
+     OR COALESCE(NEW.place_box, '') <> '' THEN
+    NEW.place := CONCAT_WS(' ▸ ',
+      NULLIF(COALESCE(NEW.place_zone, ''), ''),
+      NULLIF(COALESCE(NEW.place_rack, ''), ''),
+      NULLIF(COALESCE(NEW.place_bin, ''), ''),
+      NULLIF(COALESCE(NEW.place_box, ''), ''));
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trig_inventory_place_sync ON public.inventory_list;
+CREATE TRIGGER trig_inventory_place_sync
+BEFORE INSERT OR UPDATE ON public.inventory_list
+FOR EACH ROW EXECUTE FUNCTION public.inventory_sync_place_path();
+
+GRANT EXECUTE ON FUNCTION public.inventory_sync_place_path() TO public;
+
+-- ── I6 location cleanup (20260920 fold-in): mapping-completion backfill ─────
+-- Unmapped products ko canonical location (inv_list structured → free-text →
+-- product_list). ON CONFLICT safe; re-run me pure old gaps hi bharte hain.
+DO $$
+DECLARE
+  p RECORD;
+  loc_id integer;
+  v_zone  text := '';
+  v_rack  text := '';
+  v_bin   text := '';
+  v_box   text := '';
+BEGIN
+  FOR p IN
+    SELECT pl.id AS product_id
+    FROM public.product_list pl
+    WHERE pl.delete_flag = 0
+      AND NOT EXISTS (
+        SELECT 1 FROM public.product_locations x WHERE x.product_id = pl.id
+      )
+  LOOP
+    v_zone := ''; v_rack := ''; v_bin := ''; v_box := '';
+    SELECT i.place_zone, i.place_rack, i.place_bin, i.place_box
+      INTO v_zone, v_rack, v_bin, v_box
+      FROM public.inventory_list i
+     WHERE i.product_id = p.product_id
+       AND i.place_zone IS NOT NULL AND i.place_zone <> ''
+     ORDER BY i.stock_date DESC NULLS LAST, i.id DESC
+     LIMIT 1;
+    IF v_zone IS NULL OR v_zone = '' THEN
+      SELECT i.place INTO v_zone
+        FROM public.inventory_list i
+       WHERE i.product_id = p.product_id
+         AND i.place IS NOT NULL AND i.place <> ''
+       ORDER BY i.stock_date DESC NULLS LAST, i.id DESC
+       LIMIT 1;
+      IF v_zone IS NOT NULL AND v_zone <> '' THEN
+        v_rack := ''; v_bin := ''; v_box := '';
+      END IF;
+    END IF;
+    IF v_zone IS NULL OR v_zone = '' THEN
+      SELECT pl2.place_zone, pl2.place_rack, pl2.place_bin, pl2.place_box
+        INTO v_zone, v_rack, v_bin, v_box
+        FROM public.product_list pl2
+       WHERE pl2.id = p.product_id;
+    END IF;
+    IF v_zone IS NOT NULL AND v_zone <> '' THEN
+      INSERT INTO public.locations (zone, rack, bin, box, label)
+      VALUES (
+        v_zone,
+        COALESCE(v_rack, ''),
+        COALESCE(v_bin, ''),
+        COALESCE(v_box, ''),
+        CONCAT_WS(' ▸ ', v_zone,
+          NULLIF(COALESCE(v_rack, ''), ''),
+          NULLIF(COALESCE(v_bin, ''), ''),
+          NULLIF(COALESCE(v_box, ''), ''))
+      )
+      ON CONFLICT (zone, rack, bin, box) DO UPDATE SET zone = EXCLUDED.zone
+      RETURNING id INTO loc_id;
+      INSERT INTO public.product_locations (product_id, location_id)
+      VALUES (p.product_id, loc_id)
+      ON CONFLICT (product_id, location_id) DO NOTHING;
+    END IF;
+  END LOOP;
+END $$;
+
+-- ── I6 location cleanup (20260920 fold-in): pgrst reload ────────────────────
+NOTIFY pgrst, 'reload schema';
+
+DROP TRIGGER IF EXISTS update_mechanic_timestamp ON public.mechanic_list;
+CREATE TRIGGER update_mechanic_timestamp BEFORE UPDATE ON public.mechanic_list FOR EACH ROW EXECUTE FUNCTION extensions.moddatetime('date_updated');
+
+DROP TRIGGER IF EXISTS update_product_timestamp ON public.product_list;
+CREATE TRIGGER update_product_timestamp BEFORE UPDATE ON public.product_list FOR EACH ROW EXECUTE FUNCTION extensions.moddatetime('date_updated');
+
+DROP TRIGGER IF EXISTS update_service_timestamp ON public.service_list;
+CREATE TRIGGER update_service_timestamp BEFORE UPDATE ON public.service_list FOR EACH ROW EXECUTE FUNCTION extensions.moddatetime('date_updated');
+
+DROP TRIGGER IF EXISTS update_transaction_timestamp ON public.transaction_list;
+CREATE TRIGGER update_transaction_timestamp BEFORE UPDATE ON public.transaction_list FOR EACH ROW EXECUTE FUNCTION extensions.moddatetime('date_updated');
+
+DROP TRIGGER IF EXISTS purchase_orders_touch ON public.purchase_orders;
+CREATE TRIGGER purchase_orders_touch BEFORE UPDATE ON public.purchase_orders FOR EACH ROW EXECUTE FUNCTION public.touch_purchase_orders();
+
+DROP TRIGGER IF EXISTS push_subscriptions_touch ON public.push_subscriptions;
+CREATE TRIGGER push_subscriptions_touch BEFORE UPDATE ON public.push_subscriptions FOR EACH ROW EXECUTE FUNCTION public.touch_push_subscriptions();
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- RLS POLICIES (48) — DROP POLICY IF EXISTS + CREATE POLICY (data-safe)
+--   Har policy pehle DROP (agar maujood ho) phir CREATE. Policy names source
+--   se normalize hokar consistent case me hain. RBI/RLS logic verbatim.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+DROP POLICY IF EXISTS rlslock_advance_payments_staff ON public.advance_payments;
+CREATE POLICY rlslock_advance_payments_staff ON public.advance_payments TO authenticated USING (public.is_frontend_staff()) WITH CHECK (public.is_frontend_staff());
+
+DROP POLICY IF EXISTS rlslock_attendance_list_staff ON public.attendance_list;
+CREATE POLICY rlslock_attendance_list_staff ON public.attendance_list TO authenticated USING (public.is_frontend_staff()) WITH CHECK (public.is_frontend_staff());
+
+DROP POLICY IF EXISTS rlslock_client_list_client_self ON public.client_list;
+CREATE POLICY rlslock_client_list_client_self ON public.client_list FOR SELECT TO authenticated USING ((public.get_my_role() = 'client'::text) AND (id = public.get_my_client_id()));
+
+DROP POLICY IF EXISTS rlslock_client_list_staff ON public.client_list;
+CREATE POLICY rlslock_client_list_staff ON public.client_list TO authenticated USING (public.is_frontend_staff()) WITH CHECK (public.is_frontend_staff());
+
+DROP POLICY IF EXISTS rlslock_direct_sale_items_staff ON public.direct_sale_items;
+CREATE POLICY rlslock_direct_sale_items_staff ON public.direct_sale_items TO authenticated USING (public.is_frontend_staff()) WITH CHECK (public.is_frontend_staff());
+
+DROP POLICY IF EXISTS rlslock_expense_list_staff ON public.expense_list;
+CREATE POLICY rlslock_expense_list_staff ON public.expense_list TO authenticated USING (public.is_frontend_staff()) WITH CHECK (public.is_frontend_staff());
+
+DROP POLICY IF EXISTS rlslock_inventory_list_staff ON public.inventory_list;
+CREATE POLICY rlslock_inventory_list_staff ON public.inventory_list TO authenticated USING (public.is_frontend_staff()) WITH CHECK (public.is_frontend_staff());
+
+DROP POLICY IF EXISTS rlslock_job_id_counter_staff ON public.job_id_counter;
+CREATE POLICY rlslock_job_id_counter_staff ON public.job_id_counter TO authenticated USING (public.is_frontend_staff()) WITH CHECK (public.is_frontend_staff());
+
+DROP POLICY IF EXISTS rlslock_lender_list_staff ON public.lender_list;
+CREATE POLICY rlslock_lender_list_staff ON public.lender_list TO authenticated USING (public.is_frontend_staff()) WITH CHECK (public.is_frontend_staff());
+
+DROP POLICY IF EXISTS rlslock_loan_payments_staff ON public.loan_payments;
+CREATE POLICY rlslock_loan_payments_staff ON public.loan_payments TO authenticated USING (public.is_frontend_staff()) WITH CHECK (public.is_frontend_staff());
+
+DROP POLICY IF EXISTS rlslock_mech_commission_staff ON public.mechanic_commission_history;
+CREATE POLICY rlslock_mech_commission_staff ON public.mechanic_commission_history TO authenticated USING (public.is_frontend_staff()) WITH CHECK (public.is_frontend_staff());
+
+DROP POLICY IF EXISTS rlslock_mechanic_list_staff ON public.mechanic_list;
+CREATE POLICY rlslock_mechanic_list_staff ON public.mechanic_list TO authenticated USING (public.is_frontend_staff()) WITH CHECK (public.is_frontend_staff());
+
+DROP POLICY IF EXISTS rlslock_mech_salary_staff ON public.mechanic_salary_history;
+CREATE POLICY rlslock_mech_salary_staff ON public.mechanic_salary_history TO authenticated USING (public.is_frontend_staff()) WITH CHECK (public.is_frontend_staff());
+
+DROP POLICY IF EXISTS rlslock_product_list_staff ON public.product_list;
+CREATE POLICY rlslock_product_list_staff ON public.product_list TO authenticated USING (public.is_frontend_staff()) WITH CHECK (public.is_frontend_staff());
+
+DROP POLICY IF EXISTS rlslock_profiles_client_self ON public.profiles;
+CREATE POLICY rlslock_profiles_client_self ON public.profiles FOR SELECT TO authenticated USING ((id = auth.uid()));
+
+DROP POLICY IF EXISTS rlslock_profiles_client_self_update ON public.profiles;
+CREATE POLICY rlslock_profiles_client_self_update ON public.profiles FOR UPDATE TO authenticated USING ((id = auth.uid())) WITH CHECK ((id = auth.uid()) AND (coalesce(role, '') = public.get_my_role()) AND (coalesce(client_id, '-1'::bigint) IS NOT DISTINCT FROM public.get_my_client_id()));
+
+DROP POLICY IF EXISTS rlslock_profiles_staff ON public.profiles;
+CREATE POLICY rlslock_profiles_staff ON public.profiles FOR SELECT TO authenticated USING (public.is_frontend_staff());
+
+DROP POLICY IF EXISTS rlslock_profiles_staff_update ON public.profiles;
+CREATE POLICY rlslock_profiles_staff_update ON public.profiles FOR UPDATE TO authenticated USING ((id = auth.uid())) WITH CHECK ((id = auth.uid()) AND public.is_frontend_staff() AND (coalesce(role, '') = public.get_my_role()) AND (coalesce(client_id, '-1'::bigint) IS NOT DISTINCT FROM public.get_my_client_id()));
+
+DROP POLICY IF EXISTS rlslock_service_list_staff ON public.service_list;
+CREATE POLICY rlslock_service_list_staff ON public.service_list TO authenticated USING (public.is_frontend_staff()) WITH CHECK (public.is_frontend_staff());
+
+DROP POLICY IF EXISTS rlslock_transaction_images_staff ON public.transaction_images;
+CREATE POLICY rlslock_transaction_images_staff ON public.transaction_images TO authenticated USING (public.is_frontend_staff()) WITH CHECK (public.is_frontend_staff());
+
+DROP POLICY IF EXISTS rlslock_transaction_products_staff ON public.transaction_products;
+CREATE POLICY rlslock_transaction_products_staff ON public.transaction_products TO authenticated USING (public.is_frontend_staff()) WITH CHECK (public.is_frontend_staff());
+
+DROP POLICY IF EXISTS rlslock_transaction_services_staff ON public.transaction_services;
+CREATE POLICY rlslock_transaction_services_staff ON public.transaction_services TO authenticated USING (public.is_frontend_staff()) WITH CHECK (public.is_frontend_staff());
+
+DROP POLICY IF EXISTS hardening_activity_staff ON public.activity_logs;
+CREATE POLICY hardening_activity_staff ON public.activity_logs TO authenticated USING ((COALESCE(( SELECT profiles.role
+   FROM public.profiles
+  WHERE (profiles.id = auth.uid())), ''::text) = ANY (ARRAY['admin'::text, 'staff'::text]))) WITH CHECK ((COALESCE(( SELECT profiles.role
+   FROM public.profiles
+  WHERE (profiles.id = auth.uid())), ''::text) = ANY (ARRAY['admin'::text, 'staff'::text])));
+
+DROP POLICY IF EXISTS hardening_msgs_anon_insert ON public.message_list;
+CREATE POLICY hardening_msgs_anon_insert ON public.message_list FOR INSERT TO anon WITH CHECK (true);
+
+DROP POLICY IF EXISTS hardening_msgs_staff ON public.message_list;
+CREATE POLICY hardening_msgs_staff ON public.message_list TO authenticated USING ((COALESCE(( SELECT profiles.role
+   FROM public.profiles
+  WHERE (profiles.id = auth.uid())), ''::text) = ANY (ARRAY['admin'::text, 'staff'::text]))) WITH CHECK ((COALESCE(( SELECT profiles.role
+   FROM public.profiles
+  WHERE (profiles.id = auth.uid())), ''::text) = ANY (ARRAY['admin'::text, 'staff'::text])));
+
+DROP POLICY IF EXISTS hardening_reminders_staff ON public.payment_reminders;
+CREATE POLICY hardening_reminders_staff ON public.payment_reminders TO authenticated USING ((COALESCE(( SELECT profiles.role
+   FROM public.profiles
+  WHERE (profiles.id = auth.uid())), ''::text) = ANY (ARRAY['admin'::text, 'staff'::text]))) WITH CHECK ((COALESCE(( SELECT profiles.role
+   FROM public.profiles
+  WHERE (profiles.id = auth.uid())), ''::text) = ANY (ARRAY['admin'::text, 'staff'::text])));
+
+DROP POLICY IF EXISTS hardening_spare_staff ON public.spare_supplier;
+CREATE POLICY hardening_spare_staff ON public.spare_supplier TO authenticated USING ((COALESCE(( SELECT profiles.role
+   FROM public.profiles
+  WHERE (profiles.id = auth.uid())), ''::text) = ANY (ARRAY['admin'::text, 'staff'::text]))) WITH CHECK ((COALESCE(( SELECT profiles.role
+   FROM public.profiles
+  WHERE (profiles.id = auth.uid())), ''::text) = ANY (ARRAY['admin'::text, 'staff'::text])));
+
+DROP POLICY IF EXISTS hardening_suppliers_staff ON public.suppliers;
+CREATE POLICY hardening_suppliers_staff ON public.suppliers TO authenticated USING ((COALESCE(( SELECT profiles.role
+   FROM public.profiles
+  WHERE (profiles.id = auth.uid())), ''::text) = ANY (ARRAY['admin'::text, 'staff'::text]))) WITH CHECK ((COALESCE(( SELECT profiles.role
+   FROM public.profiles
+  WHERE (profiles.id = auth.uid())), ''::text) = ANY (ARRAY['admin'::text, 'staff'::text])));
+
+DROP POLICY IF EXISTS rlslock_supplier_contacts_staff ON public.supplier_contacts;
+CREATE POLICY rlslock_supplier_contacts_staff ON public.supplier_contacts
+  FOR ALL TO authenticated
+  USING (public.is_frontend_staff())
+  WITH CHECK (public.is_frontend_staff());
+
+DROP POLICY IF EXISTS hardening_sysinfo_anon_read ON public.system_info;
+CREATE POLICY hardening_sysinfo_anon_read ON public.system_info FOR SELECT TO anon USING ((meta_field = ANY (ARRAY['name'::text, 'short_name'::text, 'logo'::text, 'cover'::text, 'email'::text, 'contact'::text, 'address'::text, 'owner'::text, 'biz_days'::text, 'biz_open'::text, 'biz_close'::text, 'gst_no'::text, 'gstin'::text, 'map_url'::text, 'map_iframe'::text, 'whatsapp'::text, 'facebook'::text, 'instagram'::text, 'youtube'::text, 'footer_text'::text, 'announcement'::text])));
+
+DROP POLICY IF EXISTS hardening_sysinfo_auth_read ON public.system_info;
+CREATE POLICY hardening_sysinfo_auth_read ON public.system_info FOR SELECT TO authenticated USING ((meta_field <> ALL (ARRAY['ai_api_key'::text, 'csrf_token'::text])));
+
+DROP POLICY IF EXISTS hardening_sysinfo_staff ON public.system_info;
+CREATE POLICY hardening_sysinfo_staff ON public.system_info TO authenticated USING ((COALESCE(( SELECT profiles.role
+   FROM public.profiles
+  WHERE (profiles.id = auth.uid())), ''::text) = ANY (ARRAY['admin'::text, 'staff'::text]))) WITH CHECK ((COALESCE(( SELECT profiles.role
+   FROM public.profiles
+  WHERE (profiles.id = auth.uid())), ''::text) = ANY (ARRAY['admin'::text, 'staff'::text])));
+
+DROP POLICY IF EXISTS hardening_wptpl_staff ON public.wp_template_history;
+CREATE POLICY hardening_wptpl_staff ON public.wp_template_history TO authenticated USING ((COALESCE(( SELECT profiles.role
+   FROM public.profiles
+  WHERE (profiles.id = auth.uid())), ''::text) = ANY (ARRAY['admin'::text, 'staff'::text]))) WITH CHECK ((COALESCE(( SELECT profiles.role
+   FROM public.profiles
+  WHERE (profiles.id = auth.uid())), ''::text) = ANY (ARRAY['admin'::text, 'staff'::text])));
+
+DROP POLICY IF EXISTS portal_client_loans_staff ON public.client_loans;
+CREATE POLICY portal_client_loans_staff ON public.client_loans TO authenticated USING (public.is_frontend_staff()) WITH CHECK (public.is_frontend_staff());
+
+DROP POLICY IF EXISTS portal_client_payments_client_own ON public.client_payments;
+CREATE POLICY portal_client_payments_client_own ON public.client_payments FOR SELECT TO authenticated USING (((( SELECT profiles.role
+   FROM public.profiles
+  WHERE (profiles.id = auth.uid())) = 'client'::text) AND (client_id = ( SELECT profiles.client_id
+   FROM public.profiles
+  WHERE (profiles.id = auth.uid())))));
+
+DROP POLICY IF EXISTS portal_client_payments_staff ON public.client_payments;
+CREATE POLICY portal_client_payments_staff ON public.client_payments TO authenticated USING (public.is_frontend_staff()) WITH CHECK (public.is_frontend_staff());
+
+DROP POLICY IF EXISTS portal_direct_sales_staff ON public.direct_sales;
+CREATE POLICY portal_direct_sales_staff ON public.direct_sales TO authenticated USING (public.is_frontend_staff()) WITH CHECK (public.is_frontend_staff());
+
+DROP POLICY IF EXISTS portal_transaction_list_client_own ON public.transaction_list;
+CREATE POLICY portal_transaction_list_client_own ON public.transaction_list FOR SELECT TO authenticated USING (((( SELECT profiles.role
+   FROM public.profiles
+  WHERE (profiles.id = auth.uid())) = 'client'::text) AND (client_name ~ '^[0-9]+$'::text) AND ((client_name)::bigint = ( SELECT profiles.client_id
+   FROM public.profiles
+  WHERE (profiles.id = auth.uid())))));
+
+DROP POLICY IF EXISTS portal_transaction_list_staff ON public.transaction_list;
+CREATE POLICY portal_transaction_list_staff ON public.transaction_list TO authenticated USING (public.is_frontend_staff()) WITH CHECK (public.is_frontend_staff());
+
+DROP POLICY IF EXISTS rlslock_purchase_orders_staff ON public.purchase_orders;
+CREATE POLICY rlslock_purchase_orders_staff ON public.purchase_orders TO authenticated USING (public.is_frontend_staff()) WITH CHECK (public.is_frontend_staff());
+
+DROP POLICY IF EXISTS rlslock_purchase_order_items_staff ON public.purchase_order_items;
+CREATE POLICY rlslock_purchase_order_items_staff ON public.purchase_order_items TO authenticated USING (public.is_frontend_staff()) WITH CHECK (public.is_frontend_staff());
+
+DROP POLICY IF EXISTS rlslock_push_subscriptions_staff ON public.push_subscriptions;
+CREATE POLICY rlslock_push_subscriptions_staff ON public.push_subscriptions TO authenticated USING (public.is_frontend_staff()) WITH CHECK (public.is_frontend_staff());
+
+DROP POLICY IF EXISTS rlslock_push_subscriptions_self ON public.push_subscriptions;
+CREATE POLICY rlslock_push_subscriptions_self ON public.push_subscriptions TO authenticated USING ((user_id = auth.uid())) WITH CHECK ((user_id = auth.uid()));
+
+-- ── Location RLS lockdown — fold-in of 20260912_rls_location_tables.sql ──
+--   (Security hole: open `to authenticated USING(true)` policies. Ab sirf
+--    is_frontend_staff() (admin/staff/developer) hi location CRUD kare.
+--    Dynamic drop sab legacy permissive policy names ko kha jata hai, phir
+--    staff-gate policies banate hain → idempotent, re-run safe.)
+do $$
+declare p record;
+begin
+  for p in
+    select policyname, tablename
+    from pg_policies
+    where schemaname = 'public'
+      and tablename in (
+        'locations', 'location_zones', 'location_racks',
+        'location_bins', 'location_boxes'
+      )
+  loop
+    execute format('drop policy if exists %I on public.%I', p.policyname, p.tablename);
+  end loop;
+end $$;
+
+DROP POLICY IF EXISTS rlslock_locations_staff ON public.locations;
+CREATE POLICY rlslock_locations_staff ON public.locations TO authenticated USING (public.is_frontend_staff()) WITH CHECK (public.is_frontend_staff());
+DROP POLICY IF EXISTS rlslock_location_zones_staff ON public.location_zones;
+CREATE POLICY rlslock_location_zones_staff ON public.location_zones TO authenticated USING (public.is_frontend_staff()) WITH CHECK (public.is_frontend_staff());
+DROP POLICY IF EXISTS rlslock_location_racks_staff ON public.location_racks;
+CREATE POLICY rlslock_location_racks_staff ON public.location_racks TO authenticated USING (public.is_frontend_staff()) WITH CHECK (public.is_frontend_staff());
+DROP POLICY IF EXISTS rlslock_location_bins_staff ON public.location_bins;
+CREATE POLICY rlslock_location_bins_staff ON public.location_bins TO authenticated USING (public.is_frontend_staff()) WITH CHECK (public.is_frontend_staff());
+DROP POLICY IF EXISTS rlslock_location_boxes_staff ON public.location_boxes;
+CREATE POLICY rlslock_location_boxes_staff ON public.location_boxes TO authenticated USING (public.is_frontend_staff()) WITH CHECK (public.is_frontend_staff());
+
+DROP POLICY IF EXISTS rlslock_product_locations_staff ON public.product_locations;
+CREATE POLICY rlslock_product_locations_staff ON public.product_locations TO authenticated USING (public.is_frontend_staff()) WITH CHECK (public.is_frontend_staff());
+
+-- ── Messenger policies (20260901_messenger_presence / _enhancements / 20260903_fix) ──
+DROP POLICY IF EXISTS msg_presence_staff_select ON public.user_presence;
+CREATE POLICY msg_presence_staff_select ON public.user_presence FOR SELECT TO authenticated USING (public.is_frontend_staff());
+DROP POLICY IF EXISTS msg_presence_self_write ON public.user_presence;
+CREATE POLICY msg_presence_self_write ON public.user_presence FOR ALL TO authenticated USING (user_id = auth.uid()) WITH CHECK (user_id = auth.uid() AND public.is_frontend_staff());
+
+DROP POLICY IF EXISTS msg_messages_select ON public.messages;
+CREATE POLICY msg_messages_select ON public.messages FOR SELECT TO authenticated USING (public.is_frontend_staff() AND (EXISTS (SELECT 1 FROM public.profiles p WHERE p.id = auth.uid() AND p.role IN ('admin'::text, 'developer'::text)) OR sender_id = auth.uid() OR recipient_id = auth.uid()));
+DROP POLICY IF EXISTS msg_messages_insert ON public.messages;
+CREATE POLICY msg_messages_insert ON public.messages FOR INSERT TO authenticated WITH CHECK (public.is_frontend_staff() AND sender_id = auth.uid());
+DROP POLICY IF EXISTS msg_messages_update ON public.messages;
+CREATE POLICY msg_messages_update ON public.messages FOR UPDATE TO authenticated USING (recipient_id = auth.uid() AND public.is_frontend_staff()) WITH CHECK (recipient_id = auth.uid() AND public.is_frontend_staff());
+DROP POLICY IF EXISTS msg_messages_delete ON public.messages;
+CREATE POLICY msg_messages_delete ON public.messages FOR DELETE TO authenticated USING (public.is_frontend_staff() AND (EXISTS (SELECT 1 FROM public.profiles p WHERE p.id = auth.uid() AND p.role IN ('admin'::text, 'developer'::text)) OR sender_id = auth.uid()));
+
+
+-- ===============================================================================
+-- OUT-OF-LINE CONSTRAINTS (PK / UNIQUE / FK) -- SINGLE TRAILING IDEMPOTENT SECTION
+--   Phase A: saare PRIMARY KEY / UNIQUE guards pehle (tables pehle hi bane hain).
+--   Phase B: saare FOREIGN KEY guards baad me (Phase A ke PK exist karte hain).
+--   Har constraint pg_constraint DO-guard se wrap hai (idempotent, data-safe).
+-- ===============================================================================
+
+-- ---- Phase A: PRIMARY KEY / UNIQUE ----------------------------------------
+
+do $$ begin if not exists (select 1 from pg_constraint where conname='activity_logs_pkey' and conrelid='public.activity_logs'::regclass) then alter table only public.activity_logs add constraint activity_logs_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='advance_payments_pkey' and conrelid='public.advance_payments'::regclass) then alter table only public.advance_payments add constraint advance_payments_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='attendance_list_pkey' and conrelid='public.attendance_list'::regclass) then alter table only public.attendance_list add constraint attendance_list_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='attendance_list_mechanic_id_curr_date_key' and conrelid='public.attendance_list'::regclass) then alter table only public.attendance_list add constraint attendance_list_mechanic_id_curr_date_key unique (mechanic_id, curr_date); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='client_list_pkey' and conrelid='public.client_list'::regclass) then alter table only public.client_list add constraint client_list_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='client_loans_pkey' and conrelid='public.client_loans'::regclass) then alter table only public.client_loans add constraint client_loans_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='client_payments_pkey' and conrelid='public.client_payments'::regclass) then alter table only public.client_payments add constraint client_payments_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='direct_sale_items_pkey' and conrelid='public.direct_sale_items'::regclass) then alter table only public.direct_sale_items add constraint direct_sale_items_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='direct_sales_pkey' and conrelid='public.direct_sales'::regclass) then alter table only public.direct_sales add constraint direct_sales_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='expense_list_pkey' and conrelid='public.expense_list'::regclass) then alter table only public.expense_list add constraint expense_list_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='inventory_list_pkey' and conrelid='public.inventory_list'::regclass) then alter table only public.inventory_list add constraint inventory_list_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='job_id_counter_pkey' and conrelid='public.job_id_counter'::regclass) then alter table only public.job_id_counter add constraint job_id_counter_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='lender_list_pkey' and conrelid='public.lender_list'::regclass) then alter table only public.lender_list add constraint lender_list_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='loan_payments_pkey' and conrelid='public.loan_payments'::regclass) then alter table only public.loan_payments add constraint loan_payments_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='login_throttle_pkey' and conrelid='public.login_throttle'::regclass) then alter table only public.login_throttle add constraint login_throttle_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='mechanic_commission_history_pkey' and conrelid='public.mechanic_commission_history'::regclass) then alter table only public.mechanic_commission_history add constraint mechanic_commission_history_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='mechanic_list_pkey' and conrelid='public.mechanic_list'::regclass) then alter table only public.mechanic_list add constraint mechanic_list_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='mechanic_salary_history_pkey' and conrelid='public.mechanic_salary_history'::regclass) then alter table only public.mechanic_salary_history add constraint mechanic_salary_history_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='message_list_pkey' and conrelid='public.message_list'::regclass) then alter table only public.message_list add constraint message_list_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='payment_reminders_pkey' and conrelid='public.payment_reminders'::regclass) then alter table only public.payment_reminders add constraint payment_reminders_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='product_list_pkey' and conrelid='public.product_list'::regclass) then alter table only public.product_list add constraint product_list_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='profiles_pkey' and conrelid='public.profiles'::regclass) then alter table only public.profiles add constraint profiles_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='service_list_pkey' and conrelid='public.service_list'::regclass) then alter table only public.service_list add constraint service_list_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='spare_supplier_pkey' and conrelid='public.spare_supplier'::regclass) then alter table only public.spare_supplier add constraint spare_supplier_pkey primary key (spare_id, supplier_id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='suppliers_pkey' and conrelid='public.suppliers'::regclass) then alter table only public.suppliers add constraint suppliers_pkey primary key (id); end if; end $$;
+
+-- supplier_contacts (multi-contact per supplier) — 20260917_supplier_visiting_card.sql
+do $$ begin if not exists (select 1 from pg_attribute a where a.attrelid='public.supplier_contacts'::regclass and a.attname='id' and a.attidentity<>'') then
+  alter table public.supplier_contacts alter column id add generated by default as identity (SEQUENCE NAME public.supplier_contacts_id_seq START WITH 1 INCREMENT BY 1 NO MINVALUE NO MAXVALUE CACHE 1);
+end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='supplier_contacts_pkey' and conrelid='public.supplier_contacts'::regclass) then
+  alter table only public.supplier_contacts add constraint supplier_contacts_pkey primary key (id);
+end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='supplier_contacts_supplier_fk' and conrelid='public.supplier_contacts'::regclass) then
+  alter table only public.supplier_contacts add constraint supplier_contacts_supplier_fk foreign key (supplier_id) references public.suppliers(id) on delete cascade;
+end if; end $$;
+CREATE INDEX IF NOT EXISTS idx_supplier_contacts_supplier_id ON public.supplier_contacts USING btree (supplier_id);
+
+-- Seed legacy single contact → primary supplier_contacts row (re-run safe)
+INSERT INTO public.supplier_contacts (supplier_id, label, phone, is_primary)
+SELECT s.id, 'Mobile', s.contact, true
+  FROM public.suppliers s
+ WHERE btrim(s.contact) <> ''
+   AND NOT EXISTS (SELECT 1 FROM public.supplier_contacts sc WHERE sc.supplier_id = s.id);
+do $$ begin if not exists (select 1 from pg_constraint where conname='system_info_pkey' and conrelid='public.system_info'::regclass) then alter table only public.system_info add constraint system_info_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='transaction_images_pkey' and conrelid='public.transaction_images'::regclass) then alter table only public.transaction_images add constraint transaction_images_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='transaction_list_pkey' and conrelid='public.transaction_list'::regclass) then alter table only public.transaction_list add constraint transaction_list_pkey primary key (id); end if; end $$;
+-- ════════════════════════════════════════════════════════════════════════
+-- BACKPORT (2026-09-06) — job_required_parts feature + transaction_products
+-- PK rework. Provenance: supabase/migrations/20260905_job_required_parts.sql
+-- Ye block is file ko khud-sufficent banata hai: kisi bhi db par (fresh
+-- standalone, ya purana live db) run karo → is state tak pahunch jayega.
+-- Fully idempotent (girne par dobara chalana safe).
+-- ════════════════════════════════════════════════════════════════════════
+
+-- ── transaction_products PK REWORK ─────────────────────────────────────────
+-- product_id composite PK `(transaction_id, product_id)` ka hissa tha →
+-- PostgreSQL 42P16 se `drop not null` block karta tha. Fix: composite PK →
+-- surrogate `id` identity PK; product_id nullable (custom non-inventory
+-- spare rows ke liye); partial unique index `(transaction_id, product_id)
+-- WHERE product_id IS NOT NULL` inventory rows ki purani uniqueness bachata
+-- hai. Constraint name `transaction_products_pkey` same rakha hai — niche
+-- wala guard isi naam se PK rows karta hai.
+alter table public.transaction_products drop constraint if exists transaction_products_pkey;
+alter table public.transaction_products alter column product_id drop not null;
+alter table public.transaction_products add column if not exists id bigint generated by default as identity;
+
+do $$ begin if not exists (select 1 from pg_constraint where conname='transaction_products_pkey' and conrelid='public.transaction_products'::regclass) then alter table only public.transaction_products add constraint transaction_products_pkey primary key (id); end if; end $$;
+
+create unique index if not exists transaction_products_inventory_uniq
+  on public.transaction_products (transaction_id, product_id)
+  where product_id is not null;
+
+-- ── job_required_parts (waiting / required spare tracking) ─────────────────
+create table if not exists public.job_required_parts (
+  id             bigint generated by default as identity,
+  transaction_id integer not null references public.transaction_list(id) on delete cascade,
+  product_id     integer references public.product_list(id) on delete set null,
+  product_name   text not null default '',
+  qty_needed     integer not null default 1,
+  qty_received   integer not null default 0,
+  status         smallint not null default 0 check (status in (0, 1, 2)),
+  supplier_id    bigint references public.suppliers(id) on delete set null,
+  source_name    text,
+  phone          text,
+  eta            date,
+  photo_url      text,
+  remark         text,
+  created_by     integer,
+  date_created   timestamptz not null default now(),
+  date_updated   timestamptz not null default now()
+);
+
+create index if not exists jrp_transaction_idx on public.job_required_parts(transaction_id);
+create index if not exists jrp_product_idx     on public.job_required_parts(product_id);
+create index if not exists jrp_open_idx        on public.job_required_parts(status) where status < 2;
+
+do $$ begin if not exists (select 1 from pg_constraint where conname='job_required_parts_pkey' and conrelid='public.job_required_parts'::regclass) then alter table only public.job_required_parts add constraint job_required_parts_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='job_required_parts_qty_check' and conrelid='public.job_required_parts'::regclass) then alter table only public.job_required_parts add constraint job_required_parts_qty_check check ((qty_needed > 0) and (qty_received >= 0)); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='job_required_parts_arrived_check' and conrelid='public.job_required_parts'::regclass) then alter table only public.job_required_parts add constraint job_required_parts_arrived_check check ((status <> 2) or (qty_received >= qty_needed)); end if; end $$;
+
+drop trigger if exists update_jrp_timestamp on public.job_required_parts;
+create trigger update_jrp_timestamp before update on public.job_required_parts
+  for each row execute function extensions.moddatetime('date_updated');
+
+alter table public.job_required_parts enable row level security;
+
+drop policy if exists rlslock_jrp_staff on public.job_required_parts;
+create policy rlslock_jrp_staff on public.job_required_parts
+  for all to authenticated
+  using (public.is_frontend_staff())
+  with check (public.is_frontend_staff());
+
+grant all on table public.job_required_parts to anon;
+grant all on table public.job_required_parts to authenticated;
+grant all on table public.job_required_parts to service_role;
+
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('spare-photos', 'spare-photos', true, 1048576, array['image/jpeg','image/png','image/webp'])
+on conflict (id) do nothing;
+
+-- ═══ end backport block ═══
+
+-- ════════════════════════════════════════════════════════════════════════
+-- BACKPORT (2026-09-12) — supplier_payments (supplier dues ledger).
+-- Provenance: supabase/migrations/20260912_supplier_payments.sql
+-- Idempotent: girne par dobara chalana safe.
+-- ════════════════════════════════════════════════════════════════════════
+create table if not exists public.supplier_payments (
+  id            bigint generated by default as identity,
+  supplier_id   bigint not null references public.suppliers(id) on delete cascade,
+  amount        numeric(12,2) not null check (amount > 0),
+  payment_mode  text not null default 'cash'
+                check (payment_mode in ('cash', 'upi', 'bank_transfer', 'cheque', 'adjustment')),
+  reference     text,
+  notes         text,
+  payment_date  date not null default current_date,
+  created_by    integer,
+  date_created  timestamptz not null default now()
+);
+
+do $$ begin if not exists (select 1 from pg_constraint where conname='supplier_payments_pkey' and conrelid='public.supplier_payments'::regclass) then alter table only public.supplier_payments add constraint supplier_payments_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='supplier_payments_amount_check' and conrelid='public.supplier_payments'::regclass) then alter table only public.supplier_payments add constraint supplier_payments_amount_check check (amount > 0); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='supplier_payments_mode_check' and conrelid='public.supplier_payments'::regclass) then alter table only public.supplier_payments add constraint supplier_payments_mode_check check (payment_mode in ('cash', 'upi', 'bank_transfer', 'cheque', 'adjustment')); end if; end $$;
+
+create index if not exists supplier_payments_supplier_idx on public.supplier_payments(supplier_id);
+create index if not exists supplier_payments_date_idx     on public.supplier_payments(payment_date desc);
+
+alter table public.supplier_payments enable row level security;
+
+drop policy if exists rlslock_supplier_payments_staff on public.supplier_payments;
+create policy rlslock_supplier_payments_staff on public.supplier_payments
+  for all to authenticated
+  using (public.is_frontend_staff())
+  with check (public.is_frontend_staff());
+
+grant all on table public.supplier_payments to anon;
+grant all on table public.supplier_payments to authenticated;
+grant all on table public.supplier_payments to service_role;
+grant usage on sequence public.supplier_payments_id_seq to anon, authenticated, service_role;
+-- ═══ end supplier_payments backport block ═══
+
+do $$ begin if not exists (select 1 from pg_constraint where conname='transaction_services_pkey' and conrelid='public.transaction_services'::regclass) then alter table only public.transaction_services add constraint transaction_services_pkey primary key (transaction_id, service_id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='users_pkey' and conrelid='public.users'::regclass) then alter table only public.users add constraint users_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='users_username_key' and conrelid='public.users'::regclass) then alter table only public.users add constraint users_username_key unique (username); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='wp_template_history_pkey' and conrelid='public.wp_template_history'::regclass) then alter table only public.wp_template_history add constraint wp_template_history_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='purchase_order_items_pkey' and conrelid='public.purchase_order_items'::regclass) then alter table only public.purchase_order_items add constraint purchase_order_items_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='purchase_orders_pkey' and conrelid='public.purchase_orders'::regclass) then alter table only public.purchase_orders add constraint purchase_orders_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='purchase_orders_po_code_key' and conrelid='public.purchase_orders'::regclass) then alter table only public.purchase_orders add constraint purchase_orders_po_code_key unique (po_code); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='push_subscriptions_pkey' and conrelid='public.push_subscriptions'::regclass) then alter table only public.push_subscriptions add constraint push_subscriptions_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='push_subscriptions_endpoint_key' and conrelid='public.push_subscriptions'::regclass) then alter table only public.push_subscriptions add constraint push_subscriptions_endpoint_key unique (endpoint); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='user_presence_pkey' and conrelid='public.user_presence'::regclass) then alter table only public.user_presence add constraint user_presence_pkey primary key (user_id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='user_presence_status_check' and conrelid='public.user_presence'::regclass) then alter table only public.user_presence add constraint user_presence_status_check check ((status = ANY (ARRAY['online'::text, 'offline'::text]))); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='messages_pkey' and conrelid='public.messages'::regclass) then alter table only public.messages add constraint messages_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='messages_no_self' and conrelid='public.messages'::regclass) then alter table only public.messages add constraint messages_no_self check ((sender_id <> recipient_id)); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='messages_content_check' and conrelid='public.messages'::regclass) then alter table only public.messages add constraint messages_content_check check ((char_length(btrim(content)) > 0)); end if; end $$;
+
+-- ---- Phase B: FOREIGN KEY ---------------------------------------------------
+
+do $$ begin if not exists (select 1 from pg_constraint where conname='profiles_client_id_fkey' and conrelid='public.profiles'::regclass) then alter table only public.profiles add constraint profiles_client_id_fkey foreign key (client_id) references public.client_list(id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='profiles_id_fkey' and conrelid='public.profiles'::regclass) then alter table only public.profiles add constraint profiles_id_fkey foreign key (id) references auth.users(id) on delete cascade; end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='profiles_mechanic_id_fkey' and conrelid='public.profiles'::regclass) then alter table only public.profiles add constraint profiles_mechanic_id_fkey foreign key (mechanic_id) references public.mechanic_list(id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='transaction_list_location_id_fkey' and conrelid='public.transaction_list'::regclass) then alter table only public.transaction_list add constraint transaction_list_location_id_fkey foreign key (location_id) references public.locations(id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='fk_mechanic' and conrelid='public.users'::regclass) then alter table only public.users add constraint fk_mechanic foreign key (mechanic_id) references public.mechanic_list(id) on delete set null; end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='purchase_order_items_po_fk' and conrelid='public.purchase_order_items'::regclass) then alter table only public.purchase_order_items add constraint purchase_order_items_po_fk foreign key (purchase_order_id) references public.purchase_orders(id) on delete cascade; end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='purchase_order_items_product_fk' and conrelid='public.purchase_order_items'::regclass) then alter table only public.purchase_order_items add constraint purchase_order_items_product_fk foreign key (product_id) references public.product_list(id) on delete restrict; end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='purchase_orders_supplier_fk' and conrelid='public.purchase_orders'::regclass) then alter table only public.purchase_orders add constraint purchase_orders_supplier_fk foreign key (supplier_id) references public.suppliers(id) on delete set null; end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='push_subscriptions_user_fk' and conrelid='public.push_subscriptions'::regclass) then alter table only public.push_subscriptions add constraint push_subscriptions_user_fk foreign key (user_id) references public.profiles(id) on delete cascade; end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='user_presence_user_id_fkey' and conrelid='public.user_presence'::regclass) then alter table only public.user_presence add constraint user_presence_user_id_fkey foreign key (user_id) references public.profiles(id) on delete cascade; end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='messages_sender_id_fkey' and conrelid='public.messages'::regclass) then alter table only public.messages add constraint messages_sender_id_fkey foreign key (sender_id) references public.profiles(id) on delete cascade; end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='messages_recipient_id_fkey' and conrelid='public.messages'::regclass) then alter table only public.messages add constraint messages_recipient_id_fkey foreign key (recipient_id) references public.profiles(id) on delete cascade; end if; end $$;
+-- direct_sale_items -> direct_sales: PHP-era table me FK reh gaya tha. Bina FK
+-- PostgREST embedded resource (`items:direct_sale_items(...)`) resolve nahi
+-- karta (PGRST200) aur orphan rows ban sakte the. Migration:
+-- 20260928_direct_sale_fk_atomic_save.sql
+do $$ begin if not exists (select 1 from pg_constraint where conname='direct_sale_items_sale_fk' and conrelid='public.direct_sale_items'::regclass) then alter table only public.direct_sale_items add constraint direct_sale_items_sale_fk foreign key (sale_id) references public.direct_sales(id) on delete cascade; end if; end $$;
+
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- INDEXES — CREATE [UNIQUE] INDEX (IF NOT EXISTS add karke idempotent)
+--   Input me kuch indexes pehle se `IF NOT EXISTS` tha, kuch NAHI tha. Fully
+--   idempotent banane ke liye har index ko `IF NOT EXISTS` se emit kar rahe hain.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE INDEX IF NOT EXISTS idx_mechanic_contact ON public.mechanic_list USING btree (contact);
+CREATE INDEX IF NOT EXISTS idx_mechanic_status ON public.mechanic_list USING btree (status);
+CREATE INDEX IF NOT EXISTS idx_payment_reminders_client ON public.payment_reminders USING btree (client_id);
+CREATE INDEX IF NOT EXISTS idx_spare_supplier_supplier ON public.spare_supplier USING btree (supplier_id);
+CREATE INDEX IF NOT EXISTS idx_suppliers_delete_flag ON public.suppliers USING btree (delete_flag);
+CREATE INDEX IF NOT EXISTS idx_wpth_template_key ON public.wp_template_history USING btree (template_key);
+CREATE INDEX IF NOT EXISTS product_list_place_zone_idx ON public.product_list USING btree (place_zone);
+CREATE INDEX IF NOT EXISTS inventory_list_place_zone_idx ON public.inventory_list USING btree (place_zone);
+CREATE INDEX IF NOT EXISTS transaction_list_location_idx ON public.transaction_list USING btree (location_id);
+-- direct_sale_items: FK column + stock-calcs grouping column. Postgres FK par
+-- auto-index nahi banata; 10+ call sites `sale_id` par filter lagte hain.
+CREATE INDEX IF NOT EXISTS direct_sale_items_sale_id_idx ON public.direct_sale_items USING btree (sale_id);
+CREATE INDEX IF NOT EXISTS direct_sale_items_product_id_idx ON public.direct_sale_items USING btree (product_id);
+CREATE UNIQUE INDEX IF NOT EXISTS login_throttle_email_uniq ON public.login_throttle USING btree (lower(email));
+CREATE UNIQUE INDEX IF NOT EXISTS profiles_mechanic_id_unique ON public.profiles USING btree (mechanic_id)
+  WHERE (mechanic_id IS NOT NULL);
+CREATE INDEX IF NOT EXISTS login_throttle_ip_idx ON public.login_throttle USING btree (ip_address);
+CREATE INDEX IF NOT EXISTS login_throttle_updated_idx ON public.login_throttle USING btree (updated_at);
+CREATE INDEX IF NOT EXISTS locations_zone_idx ON public.locations (zone);
+CREATE UNIQUE INDEX IF NOT EXISTS locations_code_idx ON public.locations (code) WHERE code IS NOT NULL;
+CREATE INDEX IF NOT EXISTS locations_kind_idx ON public.locations (kind);
+CREATE INDEX IF NOT EXISTS product_locations_product_idx ON public.product_locations (product_id);
+CREATE INDEX IF NOT EXISTS product_locations_location_idx ON public.product_locations (location_id);
+CREATE INDEX IF NOT EXISTS purchase_order_items_po_idx ON public.purchase_order_items USING btree (purchase_order_id);
+CREATE INDEX IF NOT EXISTS purchase_order_items_product_idx ON public.purchase_order_items USING btree (product_id);
+CREATE INDEX IF NOT EXISTS purchase_orders_status_idx ON public.purchase_orders USING btree (status);
+CREATE INDEX IF NOT EXISTS purchase_orders_supplier_idx ON public.purchase_orders USING btree (supplier_id);
+CREATE INDEX IF NOT EXISTS push_subscriptions_user_idx ON public.push_subscriptions USING btree (user_id);
+CREATE INDEX IF NOT EXISTS push_subscriptions_enabled_idx ON public.push_subscriptions USING btree (enabled);
+CREATE INDEX IF NOT EXISTS user_presence_status_idx ON public.user_presence USING btree (status);
+CREATE INDEX IF NOT EXISTS messages_conv_idx ON public.messages USING btree (sender_id, recipient_id, created_at);
+CREATE INDEX IF NOT EXISTS messages_recipient_unread_idx ON public.messages USING btree (recipient_id, read_at);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- GRANTS (''~248'') + DEFAULT PRIVILEGES — verbatim (regrant idempotent hai).
+--   Sab GRANT / ALTER DEFAULT PRIVILEGES source se wahi rakhe hain.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+GRANT USAGE ON SCHEMA public TO postgres;
+GRANT USAGE ON SCHEMA public TO anon;
+GRANT USAGE ON SCHEMA public TO authenticated;
+GRANT USAGE ON SCHEMA public TO service_role;
+GRANT ALL ON FUNCTION public.get_transactions_with_client_data(date_from date, date_to date) TO anon;
+GRANT ALL ON FUNCTION public.get_transactions_with_client_data(date_from date, date_to date) TO authenticated;
+GRANT ALL ON FUNCTION public.get_transactions_with_client_data(date_from date, date_to date) TO service_role;
+GRANT ALL ON FUNCTION public.handle_new_user() TO anon;
+GRANT ALL ON FUNCTION public.handle_new_user() TO authenticated;
+GRANT ALL ON FUNCTION public.handle_new_user() TO service_role;
+GRANT ALL ON FUNCTION public.prevent_role_escalation() TO anon;
+GRANT ALL ON FUNCTION public.prevent_role_escalation() TO authenticated;
+GRANT ALL ON FUNCTION public.prevent_role_escalation() TO service_role;
+GRANT ALL ON FUNCTION public.reset_sequence(table_name text) TO anon;
+GRANT ALL ON FUNCTION public.reset_sequence(table_name text) TO authenticated;
+GRANT ALL ON FUNCTION public.reset_sequence(table_name text) TO service_role;
+GRANT ALL ON FUNCTION public.update_date_updated() TO anon;
+GRANT ALL ON FUNCTION public.update_date_updated() TO authenticated;
+GRANT ALL ON FUNCTION public.update_date_updated() TO service_role;
+GRANT ALL ON FUNCTION public.get_dashboard_stats(p_today_start text, p_today_end text) TO authenticated;
+GRANT ALL ON FUNCTION public.get_financial_summary(p_from text, p_to text) TO authenticated;
+GRANT ALL ON FUNCTION public.get_monthly_revenue(p_months integer) TO authenticated;
+GRANT ALL ON FUNCTION public.get_technician_metrics(p_from text, p_to text) TO authenticated;
+GRANT ALL ON TABLE public.activity_logs TO anon;
+GRANT ALL ON TABLE public.activity_logs TO authenticated;
+GRANT ALL ON TABLE public.activity_logs TO service_role;
+GRANT ALL ON SEQUENCE public.activity_logs_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.activity_logs_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.activity_logs_id_seq TO service_role;
+GRANT ALL ON TABLE public.advance_payments TO anon;
+GRANT ALL ON TABLE public.advance_payments TO authenticated;
+GRANT ALL ON TABLE public.advance_payments TO service_role;
+GRANT ALL ON SEQUENCE public.advance_payments_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.advance_payments_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.advance_payments_id_seq TO service_role;
+GRANT ALL ON TABLE public.attendance_list TO anon;
+GRANT ALL ON TABLE public.attendance_list TO authenticated;
+GRANT ALL ON TABLE public.attendance_list TO service_role;
+GRANT ALL ON SEQUENCE public.attendance_list_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.attendance_list_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.attendance_list_id_seq TO service_role;
+GRANT ALL ON TABLE public.client_list TO anon;
+GRANT ALL ON TABLE public.client_list TO authenticated;
+GRANT ALL ON TABLE public.client_list TO service_role;
+GRANT ALL ON SEQUENCE public.client_list_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.client_list_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.client_list_id_seq TO service_role;
+GRANT ALL ON TABLE public.client_loans TO anon;
+GRANT ALL ON TABLE public.client_loans TO authenticated;
+GRANT ALL ON TABLE public.client_loans TO service_role;
+GRANT ALL ON SEQUENCE public.client_loans_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.client_loans_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.client_loans_id_seq TO service_role;
+GRANT ALL ON TABLE public.client_payments TO anon;
+GRANT ALL ON TABLE public.client_payments TO authenticated;
+GRANT ALL ON TABLE public.client_payments TO service_role;
+GRANT ALL ON SEQUENCE public.client_payments_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.client_payments_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.client_payments_id_seq TO service_role;
+GRANT ALL ON TABLE public.direct_sale_items TO anon;
+GRANT ALL ON TABLE public.direct_sale_items TO authenticated;
+GRANT ALL ON TABLE public.direct_sale_items TO service_role;
+GRANT ALL ON SEQUENCE public.direct_sale_items_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.direct_sale_items_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.direct_sale_items_id_seq TO service_role;
+GRANT ALL ON TABLE public.direct_sales TO anon;
+GRANT ALL ON TABLE public.direct_sales TO authenticated;
+GRANT ALL ON TABLE public.direct_sales TO service_role;
+GRANT ALL ON SEQUENCE public.direct_sales_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.direct_sales_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.direct_sales_id_seq TO service_role;
+GRANT ALL ON TABLE public.expense_list TO anon;
+GRANT ALL ON TABLE public.expense_list TO authenticated;
+GRANT ALL ON TABLE public.expense_list TO service_role;
+GRANT ALL ON SEQUENCE public.expense_list_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.expense_list_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.expense_list_id_seq TO service_role;
+GRANT ALL ON TABLE public.inventory_list TO anon;
+GRANT ALL ON TABLE public.inventory_list TO authenticated;
+GRANT ALL ON TABLE public.inventory_list TO service_role;
+GRANT ALL ON SEQUENCE public.inventory_list_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.inventory_list_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.inventory_list_id_seq TO service_role;
+GRANT ALL ON TABLE public.job_id_counter TO anon;
+GRANT ALL ON TABLE public.job_id_counter TO authenticated;
+GRANT ALL ON TABLE public.job_id_counter TO service_role;
+GRANT ALL ON SEQUENCE public.job_id_counter_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.job_id_counter_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.job_id_counter_id_seq TO service_role;
+GRANT ALL ON TABLE public.lender_list TO anon;
+GRANT ALL ON TABLE public.lender_list TO authenticated;
+GRANT ALL ON TABLE public.lender_list TO service_role;
+GRANT ALL ON SEQUENCE public.lender_list_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.lender_list_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.lender_list_id_seq TO service_role;
+GRANT ALL ON TABLE public.loan_payments TO anon;
+GRANT ALL ON TABLE public.loan_payments TO authenticated;
+GRANT ALL ON TABLE public.loan_payments TO service_role;
+GRANT ALL ON SEQUENCE public.loan_payments_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.loan_payments_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.loan_payments_id_seq TO service_role;
+GRANT ALL ON TABLE public.login_throttle TO anon;
+GRANT ALL ON TABLE public.login_throttle TO authenticated;
+GRANT ALL ON TABLE public.login_throttle TO service_role;
+GRANT ALL ON SEQUENCE public.login_throttle_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.login_throttle_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.login_throttle_id_seq TO service_role;
+GRANT ALL ON TABLE public.mechanic_commission_history TO anon;
+GRANT ALL ON TABLE public.mechanic_commission_history TO authenticated;
+GRANT ALL ON TABLE public.mechanic_commission_history TO service_role;
+GRANT ALL ON SEQUENCE public.mechanic_commission_history_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.mechanic_commission_history_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.mechanic_commission_history_id_seq TO service_role;
+GRANT ALL ON TABLE public.mechanic_list TO anon;
+GRANT ALL ON TABLE public.mechanic_list TO authenticated;
+GRANT ALL ON TABLE public.mechanic_list TO service_role;
+GRANT ALL ON SEQUENCE public.mechanic_list_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.mechanic_list_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.mechanic_list_id_seq TO service_role;
+GRANT ALL ON TABLE public.mechanic_salary_history TO anon;
+GRANT ALL ON TABLE public.mechanic_salary_history TO authenticated;
+GRANT ALL ON TABLE public.mechanic_salary_history TO service_role;
+GRANT ALL ON SEQUENCE public.mechanic_salary_history_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.mechanic_salary_history_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.mechanic_salary_history_id_seq TO service_role;
+GRANT ALL ON TABLE public.message_list TO anon;
+GRANT ALL ON TABLE public.message_list TO authenticated;
+GRANT ALL ON TABLE public.message_list TO service_role;
+GRANT ALL ON SEQUENCE public.message_list_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.message_list_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.message_list_id_seq TO service_role;
+GRANT ALL ON TABLE public.payment_reminders TO anon;
+GRANT ALL ON TABLE public.payment_reminders TO authenticated;
+GRANT ALL ON TABLE public.payment_reminders TO service_role;
+GRANT ALL ON SEQUENCE public.payment_reminders_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.payment_reminders_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.payment_reminders_id_seq TO service_role;
+GRANT ALL ON TABLE public.product_list TO anon;
+GRANT ALL ON TABLE public.product_list TO authenticated;
+GRANT ALL ON TABLE public.product_list TO service_role;
+GRANT ALL ON SEQUENCE public.product_list_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.product_list_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.product_list_id_seq TO service_role;
+GRANT ALL ON TABLE public.profiles TO anon;
+GRANT ALL ON TABLE public.profiles TO authenticated;
+GRANT ALL ON TABLE public.profiles TO service_role;
+GRANT ALL ON TABLE public.purchase_order_items TO anon;
+GRANT ALL ON TABLE public.purchase_order_items TO authenticated;
+GRANT ALL ON TABLE public.purchase_order_items TO service_role;
+GRANT ALL ON SEQUENCE public.purchase_order_items_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.purchase_order_items_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.purchase_order_items_id_seq TO service_role;
+GRANT ALL ON TABLE public.purchase_orders TO anon;
+GRANT ALL ON TABLE public.purchase_orders TO authenticated;
+GRANT ALL ON TABLE public.purchase_orders TO service_role;
+GRANT ALL ON SEQUENCE public.purchase_orders_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.purchase_orders_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.purchase_orders_id_seq TO service_role;
+GRANT ALL ON TABLE public.push_subscriptions TO anon;
+GRANT ALL ON TABLE public.push_subscriptions TO authenticated;
+GRANT ALL ON TABLE public.push_subscriptions TO service_role;
+GRANT ALL ON SEQUENCE public.push_subscriptions_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.push_subscriptions_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.push_subscriptions_id_seq TO service_role;
+GRANT ALL ON TABLE public.service_list TO anon;
+GRANT ALL ON TABLE public.service_list TO authenticated;
+GRANT ALL ON TABLE public.service_list TO service_role;
+GRANT ALL ON SEQUENCE public.service_list_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.service_list_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.service_list_id_seq TO service_role;
+GRANT ALL ON TABLE public.spare_supplier TO anon;
+GRANT ALL ON TABLE public.spare_supplier TO authenticated;
+GRANT ALL ON TABLE public.spare_supplier TO service_role;
+GRANT ALL ON TABLE public.suppliers TO anon;
+GRANT ALL ON TABLE public.suppliers TO authenticated;
+GRANT ALL ON TABLE public.suppliers TO service_role;
+GRANT ALL ON SEQUENCE public.suppliers_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.suppliers_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.suppliers_id_seq TO service_role;
+GRANT ALL ON TABLE public.supplier_contacts TO anon;
+GRANT ALL ON TABLE public.supplier_contacts TO authenticated;
+GRANT ALL ON TABLE public.supplier_contacts TO service_role;
+GRANT ALL ON SEQUENCE public.supplier_contacts_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.supplier_contacts_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.supplier_contacts_id_seq TO service_role;
+GRANT ALL ON TABLE public.system_info TO anon;
+GRANT ALL ON TABLE public.system_info TO authenticated;
+GRANT ALL ON TABLE public.system_info TO service_role;
+GRANT ALL ON SEQUENCE public.system_info_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.system_info_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.system_info_id_seq TO service_role;
+GRANT ALL ON TABLE public.transaction_images TO anon;
+GRANT ALL ON TABLE public.transaction_images TO authenticated;
+GRANT ALL ON TABLE public.transaction_images TO service_role;
+GRANT ALL ON SEQUENCE public.transaction_images_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.transaction_images_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.transaction_images_id_seq TO service_role;
+GRANT ALL ON TABLE public.transaction_list TO anon;
+GRANT ALL ON TABLE public.transaction_list TO authenticated;
+GRANT ALL ON TABLE public.transaction_list TO service_role;
+GRANT ALL ON SEQUENCE public.transaction_list_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.transaction_list_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.transaction_list_id_seq TO service_role;
+GRANT ALL ON TABLE public.transaction_products TO anon;
+GRANT ALL ON TABLE public.transaction_products TO authenticated;
+GRANT ALL ON TABLE public.transaction_products TO service_role;
+GRANT ALL ON TABLE public.transaction_services TO anon;
+GRANT ALL ON TABLE public.transaction_services TO authenticated;
+GRANT ALL ON TABLE public.transaction_services TO service_role;
+GRANT ALL ON TABLE public.users TO anon;
+GRANT ALL ON TABLE public.users TO authenticated;
+GRANT ALL ON TABLE public.users TO service_role;
+GRANT ALL ON SEQUENCE public.users_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.users_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.users_id_seq TO service_role;
+GRANT ALL ON TABLE public.wp_template_history TO anon;
+GRANT ALL ON TABLE public.wp_template_history TO authenticated;
+GRANT ALL ON TABLE public.wp_template_history TO service_role;
+GRANT ALL ON SEQUENCE public.wp_template_history_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.wp_template_history_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.wp_template_history_id_seq TO service_role;
+GRANT ALL ON TABLE public.locations TO anon;
+GRANT ALL ON TABLE public.locations TO authenticated;
+GRANT ALL ON TABLE public.locations TO service_role;
+GRANT ALL ON SEQUENCE public.locations_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.locations_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.locations_id_seq TO service_role;
+GRANT ALL ON TABLE public.location_zones TO anon;
+GRANT ALL ON TABLE public.location_zones TO authenticated;
+GRANT ALL ON TABLE public.location_zones TO service_role;
+GRANT ALL ON SEQUENCE public.location_zones_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.location_zones_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.location_zones_id_seq TO service_role;
+GRANT ALL ON TABLE public.location_racks TO anon;
+GRANT ALL ON TABLE public.location_racks TO authenticated;
+GRANT ALL ON TABLE public.location_racks TO service_role;
+GRANT ALL ON SEQUENCE public.location_racks_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.location_racks_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.location_racks_id_seq TO service_role;
+GRANT ALL ON TABLE public.location_bins TO anon;
+GRANT ALL ON TABLE public.location_bins TO authenticated;
+GRANT ALL ON TABLE public.location_bins TO service_role;
+GRANT ALL ON SEQUENCE public.location_bins_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.location_bins_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.location_bins_id_seq TO service_role;
+GRANT ALL ON TABLE public.location_boxes TO anon;
+GRANT ALL ON TABLE public.location_boxes TO authenticated;
+GRANT ALL ON TABLE public.location_boxes TO service_role;
+GRANT ALL ON SEQUENCE public.location_boxes_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.location_boxes_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.location_boxes_id_seq TO service_role;
+GRANT ALL ON TABLE public.product_locations TO anon;
+GRANT ALL ON TABLE public.product_locations TO authenticated;
+GRANT ALL ON TABLE public.product_locations TO service_role;
+GRANT ALL ON TABLE public.user_presence TO anon;
+GRANT ALL ON TABLE public.user_presence TO authenticated;
+GRANT ALL ON TABLE public.user_presence TO service_role;
+GRANT ALL ON TABLE public.messages TO anon;
+GRANT ALL ON TABLE public.messages TO authenticated;
+GRANT ALL ON TABLE public.messages TO service_role;
+GRANT ALL ON SEQUENCE public.messages_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.messages_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.messages_id_seq TO service_role;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON SEQUENCES TO postgres;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON SEQUENCES TO anon;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON SEQUENCES TO authenticated;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON SEQUENCES TO service_role;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON FUNCTIONS TO postgres;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON FUNCTIONS TO anon;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON FUNCTIONS TO authenticated;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON FUNCTIONS TO service_role;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON TABLES TO postgres;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON TABLES TO anon;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON TABLES TO authenticated;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON TABLES TO service_role;
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- STORAGE BUCKETS — idempotent insert (on conflict do nothing). No auth/storage
+-- schema changes; bas buckets. Auth/storage schemas Supabase khud banata hai.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values
+  ('client-photos',   'client-photos',   true, 1048576, array['image/jpeg','image/png','image/webp']),
+  ('job-images',      'job-images',      true, 1048576, array['image/jpeg','image/png','image/webp']),
+  ('mechanic-photos', 'mechanic-photos', true, 1048576, array['image/jpeg','image/png','image/webp']),
+  ('user-avatars',    'user-avatars',    true, 1048576, array['image/jpeg','image/png','image/webp']),
+  ('product-images',  'product-images',  true, 1048576, array['image/jpeg','image/png','image/webp']),
+  ('supplier-photos', 'supplier-photos', true, 1048576, array['image/jpeg','image/png','image/webp']),
+  ('media',           'media',           true, 1048576, array['image/jpeg','image/png','image/webp','image/gif'])
+on conflict (id) do nothing;
+
+-- ── Messenger media storage policies (20260901_messenger_enhancements.sql) ──
+DROP POLICY IF EXISTS media_staff_insert ON storage.objects;
+CREATE POLICY media_staff_insert ON storage.objects FOR INSERT TO authenticated WITH CHECK (bucket_id = 'media' AND public.is_frontend_staff());
+DROP POLICY IF EXISTS media_staff_delete ON storage.objects;
+CREATE POLICY media_staff_delete ON storage.objects FOR DELETE TO authenticated USING (bucket_id = 'media' AND public.is_frontend_staff());
+
+-- ── Supplier visiting-card photo policies (20260917_supplier_visiting_card.sql) ──
+DROP POLICY IF EXISTS supplier_photos_staff_insert ON storage.objects;
+CREATE POLICY supplier_photos_staff_insert ON storage.objects FOR INSERT TO authenticated WITH CHECK (bucket_id = 'supplier-photos' AND public.is_frontend_staff());
+DROP POLICY IF EXISTS supplier_photos_staff_delete ON storage.objects;
+CREATE POLICY supplier_photos_staff_delete ON storage.objects FOR DELETE TO authenticated USING (bucket_id = 'supplier-photos' AND public.is_frontend_staff());
+
+-- ── Realtime (20260901_messenger_presence.sql) — guarded, idempotent ──
+do $$
+begin
+  alter publication supabase_realtime add table public.messages;
+exception when duplicate_object then null;
+end $$;
+do $$
+begin
+  alter publication supabase_realtime add table public.user_presence;
+exception when duplicate_object then null;
+end $$;
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- I2 — STOCKTAKE & STOCK ADJUSTMENT
+--   Fold-in of 20260914_stocktake_stock_adjustment.sql (isolated). Self-contained
+--   + idempotent; every referenced helper (is_frontend_staff, get_inventory_stock)
+--   is defined earlier in this file. Corrections write a +/− reconciliation row
+--   into inventory_list (negative allowed) + both audit-ledger tables atomically,
+--   so derived available matches the physical count WITHOUT deleting history.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- Tables
+CREATE TABLE IF NOT EXISTS public.stock_counts (
+    id bigint NOT NULL,
+    product_id integer NOT NULL,
+    counted_qty integer NOT NULL,
+    counted_at timestamptz DEFAULT now(),
+    counted_by uuid,
+    note text,
+    created_at timestamptz DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.stock_adjustments (
+    id bigint NOT NULL,
+    product_id integer NOT NULL,
+    delta integer NOT NULL,
+    reason text NOT NULL,
+    remark text,
+    created_at timestamptz DEFAULT now(),
+    created_by uuid,
+    inventory_list_id integer
+);
+
+-- Guarded column adds
+do $$ begin
+  alter table public.stock_counts add column if not exists id bigint;
+  alter table public.stock_counts add column if not exists product_id integer;
+  alter table public.stock_counts add column if not exists counted_qty integer;
+  alter table public.stock_counts add column if not exists counted_at timestamptz DEFAULT now();
+  alter table public.stock_counts add column if not exists counted_by uuid;
+  alter table public.stock_counts add column if not exists note text;
+  alter table public.stock_counts add column if not exists created_at timestamptz DEFAULT now();
+  if exists (select 1 from information_schema.columns where table_schema='public' and table_name='stock_counts' and column_name='id' and is_nullable='YES') then
+    alter table public.stock_counts alter column id set not null;
+  end if;
+exception when duplicate_column then null; end $$;
+
+do $$ begin
+  alter table public.stock_adjustments add column if not exists id bigint;
+  alter table public.stock_adjustments add column if not exists product_id integer;
+  alter table public.stock_adjustments add column if not exists delta integer;
+  alter table public.stock_adjustments add column if not exists reason text;
+  alter table public.stock_adjustments add column if not exists remark text;
+  alter table public.stock_adjustments add column if not exists created_at timestamptz DEFAULT now();
+  alter table public.stock_adjustments add column if not exists created_by uuid;
+  alter table public.stock_adjustments add column if not exists inventory_list_id integer;
+  if exists (select 1 from information_schema.columns where table_schema='public' and table_name='stock_adjustments' and column_name='id' and is_nullable='YES') then
+    alter table public.stock_adjustments alter column id set not null;
+  end if;
+exception when duplicate_column then null; end $$;
+
+-- Identity (id auto-increment)
+do $$ begin
+  if not exists (select 1 from pg_attribute a where a.attrelid='public.stock_counts'::regclass and a.attname='id' and a.attidentity<>'') then
+    alter table public.stock_counts alter column id add generated by default as identity;
+  end if;
+end $$;
+
+do $$ begin
+  if not exists (select 1 from pg_attribute a where a.attrelid='public.stock_adjustments'::regclass and a.attname='id' and a.attidentity<>'') then
+    alter table public.stock_adjustments alter column id add generated by default as identity;
+  end if;
+end $$;
+
+ALTER TABLE public.stock_counts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.stock_adjustments ENABLE ROW LEVEL SECURITY;
+
+-- Primary keys + checks
+do $$ begin if not exists (select 1 from pg_constraint where conname='stock_counts_pkey' and conrelid='public.stock_counts'::regclass) then alter table only public.stock_counts add constraint stock_counts_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='stock_adjustments_pkey' and conrelid='public.stock_adjustments'::regclass) then alter table only public.stock_adjustments add constraint stock_adjustments_pkey primary key (id); end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='stock_adjustments_reason_check' and conrelid='public.stock_adjustments'::regclass) then alter table only public.stock_adjustments add constraint stock_adjustments_reason_check check ((reason in ('shrinkage'::text, 'damage'::text, 'correction'::text, 'return'::text))); end if; end $$;
+
+-- Foreign keys
+do $$ begin if not exists (select 1 from pg_constraint where conname='stock_counts_product_id_fkey' and conrelid='public.stock_counts'::regclass) then alter table only public.stock_counts add constraint stock_counts_product_id_fkey foreign key (product_id) references public.product_list(id) on delete cascade; end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='stock_counts_counted_by_fkey' and conrelid='public.stock_counts'::regclass) then alter table only public.stock_counts add constraint stock_counts_counted_by_fkey foreign key (counted_by) references public.profiles(id) on delete set null; end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='stock_adjustments_product_id_fkey' and conrelid='public.stock_adjustments'::regclass) then alter table only public.stock_adjustments add constraint stock_adjustments_product_id_fkey foreign key (product_id) references public.product_list(id) on delete cascade; end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='stock_adjustments_created_by_fkey' and conrelid='public.stock_adjustments'::regclass) then alter table only public.stock_adjustments add constraint stock_adjustments_created_by_fkey foreign key (created_by) references public.profiles(id) on delete set null; end if; end $$;
+do $$ begin if not exists (select 1 from pg_constraint where conname='stock_adjustments_inventory_list_id_fkey' and conrelid='public.stock_adjustments'::regclass) then alter table only public.stock_adjustments add constraint stock_adjustments_inventory_list_id_fkey foreign key (inventory_list_id) references public.inventory_list(id) on delete set null; end if; end $$;
+
+-- RLS policies — staff-only (anon = 0)
+DROP POLICY IF EXISTS rlslock_stock_counts_staff ON public.stock_counts;
+CREATE POLICY rlslock_stock_counts_staff ON public.stock_counts TO authenticated USING (public.is_frontend_staff()) WITH CHECK (public.is_frontend_staff());
+DROP POLICY IF EXISTS rlslock_stock_adjustments_staff ON public.stock_adjustments;
+CREATE POLICY rlslock_stock_adjustments_staff ON public.stock_adjustments TO authenticated USING (public.is_frontend_staff()) WITH CHECK (public.is_frontend_staff());
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS stock_counts_product_created_idx ON public.stock_counts USING btree (product_id, counted_at);
+CREATE INDEX IF NOT EXISTS stock_adjustments_product_created_idx ON public.stock_adjustments USING btree (product_id, created_at);
+
+-- Atomic writer RPC: record_stocktake (SECURITY DEFINER + staff check)
+CREATE OR REPLACE FUNCTION public.record_stocktake(
+    p_product_id integer,
+    p_counted_qty integer,
+    p_reason text DEFAULT 'correction',
+    p_note text DEFAULT NULL,
+    p_remark text DEFAULT NULL,
+    p_place text DEFAULT NULL
+) RETURNS TABLE(
+    adjustment_id bigint,
+    inventory_list_id integer,
+    available_before bigint,
+    delta integer
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+declare
+    v_available bigint;
+    v_delta integer;
+    v_inv_id integer;
+    v_adj_id bigint;
+begin
+    if not public.is_frontend_staff() then
+        raise exception 'permission denied: staff only';
+    end if;
+
+    if p_counted_qty is null then
+        raise exception 'counted_qty is required';
+    end if;
+    if p_reason is null or p_reason not in ('shrinkage','damage','correction','return') then
+        raise exception 'invalid reason: %', coalesce(p_reason, '<null>');
+    end if;
+    if p_product_id is null then
+        raise exception 'product_id is required';
+    end if;
+
+    select available into v_available
+      from public.get_inventory_stock(array[p_product_id]::int8[])
+      where product_id = p_product_id;
+    if v_available is null then
+        v_available := 0;
+    end if;
+
+    v_delta := p_counted_qty - v_available;
+
+    insert into public.inventory_list
+        (product_id, quantity, stock_date, purchase_cost, place, date_created, date_updated)
+    values
+        (p_product_id, v_delta, current_date, 0, p_place, now(), now())
+    returning id into v_inv_id;
+
+    insert into public.stock_adjustments
+        (product_id, delta, reason, remark, created_by, inventory_list_id)
+    values
+        (p_product_id, v_delta, p_reason, p_remark, auth.uid(), v_inv_id)
+    returning id into v_adj_id;
+
+    insert into public.stock_counts
+        (product_id, counted_qty, counted_by, note)
+    values
+        (p_product_id, p_counted_qty, auth.uid(), p_note);
+
+    return query select v_adj_id::bigint, v_inv_id, v_available, v_delta;
+end;
+$$;
+
+REVOKE ALL ON FUNCTION public.record_stocktake(integer, integer, text, text, text, text) FROM public;
+GRANT EXECUTE ON FUNCTION public.record_stocktake(integer, integer, text, text, text, text) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.record_stocktake(integer, integer, text, text, text, text) TO service_role;
+
+-- Store-level grants
+GRANT ALL ON TABLE public.stock_counts TO anon;
+GRANT ALL ON TABLE public.stock_counts TO authenticated;
+GRANT ALL ON TABLE public.stock_counts TO service_role;
+GRANT ALL ON TABLE public.stock_adjustments TO anon;
+GRANT ALL ON TABLE public.stock_adjustments TO authenticated;
+GRANT ALL ON TABLE public.stock_adjustments TO service_role;
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- I4 — PO PARTIAL RECEIPT + AUTO-REORDER + PRICING FLOW
+--   Fold-in of 20260915_po_partial_receipt.sql + 20260918_po_pricing_flow.sql
+--   Self-contained + idempotent. Adds 'partially_received' to
+--   purchase_orders.status CHECK and an atomic SECURITY DEFINER writer RPC
+--   `receive_po_receipt` that validates per-line received qty <= outstanding
+--   server-side, writes inventory_list stock-in rows with unit_cost + sell_price,
+--   bumps purchase_order_items.qty_received, distributes PO-level expenses into
+--   purchase_cost, updates product_list.cost_price (weighted average) and
+--   product_list.price (sell price, first receive only), and syncs
+--   job_required_parts (FIFO). Sets PO status to partially_received/received.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- Extend purchase_orders.status CHECK to allow 'partially_received'
+do $$
+declare v_def text;
+begin
+  select pg_get_constraintdef(oid) into v_def
+    from pg_constraint
+   where conrelid = 'public.purchase_orders'::regclass
+     and conname = 'purchase_orders_status_check';
+  if v_def is null or position('partially_received' in v_def) = 0 then
+    alter table public.purchase_orders drop constraint if exists purchase_orders_status_check;
+    alter table public.purchase_orders add constraint purchase_orders_status_check
+      check (status = ANY (ARRAY['pending'::text, 'ordered'::text, 'partially_received'::text, 'received'::text, 'cancelled'::text]));
+  end if;
+end $$;
+
+-- Atomic writer RPC: receive_po_receipt (SECURITY DEFINER + staff check)
+-- p_lines: [{"product_id": <int>, "qty": <int>, "unit_cost": <num>, "sell_price": <num>}]
+-- p_expenses: total PO-level expenses (distributed per-unit across all lines)
+CREATE OR REPLACE FUNCTION public.receive_po_receipt(
+    p_po_id bigint,
+    p_lines jsonb,
+    p_expenses numeric DEFAULT 0
+)
+RETURNS TABLE(
+    item_id bigint,
+    product_id bigint,
+    qty_total_received integer,
+    outstanding_after integer
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+declare
+    l record;
+    jrp record;
+    v_outstanding integer;
+    v_any_open boolean := false;
+    v_still integer;
+    v_po_supplier_id bigint;
+    v_total_received numeric := 0;
+    v_new_purchase_cost numeric;
+    v_old_qty integer;
+    v_old_cost numeric;
+    v_new_qty integer;
+    v_total_expenses_per_unit numeric;
+    v_existing_sell_price numeric;
+begin
+    if not public.is_frontend_staff() then
+        raise exception 'permission denied: staff only';
+    end if;
+    if p_po_id is null then
+        raise exception 'po_id is required';
+    end if;
+    if p_lines is null or jsonb_typeof(p_lines) <> 'array' or jsonb_array_length(p_lines) = 0 then
+        raise exception 'lines is required (non-empty array)';
+    end if;
+
+    -- fetch supplier_id from PO
+    select po.supplier_id into v_po_supplier_id
+      from public.purchase_orders po where po.id = p_po_id;
+
+    -- total qty being received (to distribute expenses per-unit)
+    select coalesce(sum((e->>'qty')::numeric), 0) into v_total_received
+      from jsonb_array_elements(p_lines) e;
+
+    -- per-unit expense distribution
+    if v_total_received > 0 and p_expenses > 0 then
+        v_total_expenses_per_unit := p_expenses / v_total_received;
+    else
+        v_total_expenses_per_unit := 0;
+    end if;
+
+    for l in
+        select (e->>'product_id')::bigint as product_id,
+               (e->>'qty')::integer as qty,
+               coalesce((e->>'unit_cost')::numeric, 0) as unit_cost,
+               coalesce((e->>'sell_price')::numeric, 0) as sell_price
+          from jsonb_array_elements(p_lines) e
+    loop
+        if l.product_id is null or l.qty is null or l.qty <= 0 then
+            raise exception 'invalid line: product_id/qty required and qty > 0';
+        end if;
+
+        -- lock outstanding row
+        select poi.qty_ordered - poi.qty_received into v_outstanding
+          from public.purchase_order_items poi
+         where poi.purchase_order_id = p_po_id
+           and poi.product_id = l.product_id
+         for update;
+
+        if v_outstanding is null then
+            raise exception 'PO line not found: product % on PO %', l.product_id, p_po_id;
+        end if;
+        if l.qty > v_outstanding then
+            raise exception 'receiving % for product % exceeds outstanding %', l.qty, l.product_id, v_outstanding;
+        end if;
+
+        -- calculate per-unit purchase cost including distributed expenses
+        v_new_purchase_cost := l.unit_cost + v_total_expenses_per_unit;
+
+        -- stock-in row with calculated purchase cost
+        INSERT INTO public.inventory_list
+            (product_id, quantity, stock_date, supplier_id, purchase_cost,
+             courier_charges, purchase_order_id, date_created, date_updated)
+        VALUES (
+            l.product_id, l.qty, current_date, v_po_supplier_id,
+            v_new_purchase_cost,
+            v_total_expenses_per_unit * l.qty,
+            p_po_id, now(), now()
+        );
+
+        -- bump received counter + preserve supplier unit_cost
+        UPDATE public.purchase_order_items poi
+           SET qty_received = poi.qty_received + l.qty,
+               unit_cost = CASE
+                 WHEN poi.unit_cost = 0 OR poi.unit_cost IS NULL THEN l.unit_cost
+                 ELSE poi.unit_cost
+               END
+         WHERE poi.purchase_order_id = p_po_id
+           AND poi.product_id = l.product_id;
+
+        -- ── Weighted Average Cost Update on product_list ──
+        SELECT
+          COALESCE(SUM(il.quantity), 0),
+          COALESCE(
+            CASE WHEN SUM(il.quantity) > 0
+              THEN SUM(il.quantity * il.purchase_cost) / SUM(il.quantity)
+              ELSE 0
+            END, 0
+        ) INTO v_old_qty, v_old_cost
+        FROM public.inventory_list il
+        WHERE il.product_id = l.product_id;
+
+        if v_old_qty > 0 then
+            UPDATE public.product_list
+               SET cost_price = v_old_cost
+             WHERE id = l.product_id;
+        end if;
+
+        -- ── Sell Price: first receive pe set, baad me preserve ──
+        SELECT pl.price INTO v_existing_sell_price
+          FROM public.product_list pl WHERE pl.id = l.product_id;
+
+        if (v_existing_sell_price IS NULL OR v_existing_sell_price = 0) AND l.sell_price > 0 then
+            UPDATE public.product_list
+               SET price = l.sell_price
+             WHERE id = l.product_id;
+        end if;
+
+        -- P1/M8 receive-sync: is PO se linked required parts ki qty_received
+        -- aur status bhardo. FIFO (date_created asc) — sabse purana open part
+        -- pehle. Part fill hote hi status = 2 (Arrived) → report se auto-out.
+        v_still := l.qty;
+        for jrp in
+            select j.id,
+                   (j.qty_needed - j.qty_received) as rem
+              from public.job_required_parts j
+             where j.purchase_order_id = p_po_id
+               and j.product_id = l.product_id
+               and j.status < 2
+               and j.qty_received < j.qty_needed
+             order by j.date_created asc, j.id asc
+             for update
+        loop
+            if v_still <= 0 then
+                exit;
+            end if;
+            if jrp.rem >= v_still then
+                update public.job_required_parts j
+                   set qty_received = j.qty_received + v_still,
+                       status = case
+                         when j.qty_received + v_still >= j.qty_needed then 2
+                         else j.status
+                       end
+                 where j.id = jrp.id;
+                v_still := 0;
+            else
+                update public.job_required_parts j
+                   set qty_received = j.qty_received + jrp.rem,
+                       status = 2
+                 where j.id = jrp.id;
+                v_still := v_still - jrp.rem;
+            end if;
+        end loop;
+    end loop;
+
+    -- update PO expenses
+    UPDATE public.purchase_orders po
+       SET expenses = p_expenses
+     WHERE po.id = p_po_id;
+
+    -- status: any remaining outstanding => partially_received, else received
+    select bool_or(poi.qty_ordered - poi.qty_received > 0) into v_any_open
+      from public.purchase_order_items poi
+     where poi.purchase_order_id = p_po_id;
+
+    update public.purchase_orders po
+       set status = case when coalesce(v_any_open, false) then 'partially_received' else 'received' end,
+           received_date = coalesce(po.received_date, current_date),
+           total_amount = (
+             SELECT COALESCE(SUM(poi2.qty_received * poi2.unit_cost), 0)
+             FROM public.purchase_order_items poi2
+             WHERE poi2.purchase_order_id = p_po_id
+           )
+     where po.id = p_po_id;
+
+    return query
+      select poi.id::bigint, poi.product_id::bigint, poi.qty_received, poi.qty_ordered - poi.qty_received
+        from public.purchase_order_items poi
+       where poi.purchase_order_id = p_po_id
+       order by poi.id;
+end;
+$$;
+
+REVOKE ALL ON FUNCTION public.receive_po_receipt(bigint, jsonb, numeric) FROM public;
+GRANT EXECUTE ON FUNCTION public.receive_po_receipt(bigint, jsonb, numeric) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.receive_po_receipt(bigint, jsonb, numeric) TO service_role;
+
+-- Atomic writer RPC: next_job_id (SECURITY DEFINER + RLS bypass).
+-- job_id_counter read-then-bump race (duplicate job rows) fix ki atomic scheme —
+-- increment + RETURN ek hi UPDATE me. Counter row missing ho to max numeric
+-- job_id / 28100 se self-seed karta hai. (20260916_atomic_job_id_counter.sql se.)
+CREATE OR REPLACE FUNCTION public.next_job_id()
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  next_val integer;
+BEGIN
+  UPDATE public.job_id_counter
+  SET last_job_id = last_job_id + 1
+  WHERE id = 1
+  RETURNING last_job_id INTO next_val;
+
+  IF next_val IS NULL THEN
+    -- id=1 row missing (edge case) — max numeric job_id se seed, phir increment
+    INSERT INTO public.job_id_counter (id, last_job_id)
+    SELECT 1, GREATEST(
+      COALESCE((SELECT MAX(CASE WHEN job_id ~ '^[0-9]+$' THEN job_id::BIGINT END)
+                FROM public.transaction_list), 0),
+      28100
+    )
+    ON CONFLICT (id) DO UPDATE
+      SET last_job_id = public.job_id_counter.last_job_id + 1
+    RETURNING last_job_id INTO next_val;
+  END IF;
+
+  RETURN next_val;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.next_job_id() FROM public;
+GRANT EXECUTE ON FUNCTION public.next_job_id() TO anon;
+GRANT EXECUTE ON FUNCTION public.next_job_id() TO authenticated;
+GRANT EXECUTE ON FUNCTION public.next_job_id() TO service_role;
+
+-- DB-level guard: auto-generated job_ids (>= 28101) unique. Legacy manual-era
+-- ids (< 28101, jaise 27322) iske daayre se bahar hain — index unhe nahi ragadta.
+CREATE UNIQUE INDEX IF NOT EXISTS transaction_list_job_id_autogen_uniq
+  ON public.transaction_list (job_id)
+  WHERE job_id ~ '^[0-9]+$' AND job_id::bigint >= 00000;
+
+-- READ-ONLY preview RPC — next_job_id() ke ULTA: counter increment NAHI karta.
+-- Form (new/bulk) par "Job No." preview isi se aata hai taaki page kholne se
+-- IDs waste na hon. Asli claim hamesha save-par next_job_id() se hota hai.
+CREATE OR REPLACE FUNCTION public.peek_next_job_id()
+RETURNS integer
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  next_val integer;
+BEGIN
+  SELECT COALESCE(last_job_id, 0) + 1
+    INTO next_val
+    FROM public.job_id_counter
+   WHERE id = 1;
+
+  IF next_val IS NULL THEN
+    SELECT GREATEST(COALESCE(MAX((job_id)::bigint), 0), 28100) + 1
+      INTO next_val
+      FROM public.transaction_list
+     WHERE job_id ~ '^[0-9]+$';
+  END IF;
+
+  RETURN next_val;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.peek_next_job_id() FROM public;
+GRANT EXECUTE ON FUNCTION public.peek_next_job_id() TO anon;
+GRANT EXECUTE ON FUNCTION public.peek_next_job_id() TO authenticated;
+GRANT EXECUTE ON FUNCTION public.peek_next_job_id() TO service_role;
+
+-- Counter self-heal: agar counter actual max job_id se aage hai (waste claims),
+-- to wapas actual max par le aata hai. Idempotent — kabhi bhi re-run safe.
+UPDATE public.job_id_counter
+   SET last_job_id = GREATEST(
+         COALESCE(
+           (SELECT MAX((job_id)::bigint)
+              FROM public.transaction_list
+             WHERE job_id ~ '^[0-9]+$'),
+           0
+         ),
+         28100
+       )
+ WHERE id = 1;
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- BACKPORT (2026-09-13) - Required Parts → PO bridge (suppliers plan P1).
+-- Provenance: supabase/migrations/20260913_required_parts_po_bridge.sql
+--   purchase_orders.transaction_id       = source job (display/trace)
+--   job_required_parts.purchase_order_id = linked PO
+-- ═══════════════════════════════════════════════════════════════════════════
+
+alter table public.purchase_orders
+  add column if not exists transaction_id integer
+    references public.transaction_list(id) on delete set null;
+
+alter table public.job_required_parts
+  add column if not exists purchase_order_id bigint
+    references public.purchase_orders(id) on delete set null;
+
+create index if not exists po_transaction_idx on public.purchase_orders(transaction_id);
+create index if not exists jrp_po_idx on public.job_required_parts(purchase_order_id);
+-- ═══ end required-parts → PO bridge backport block ═══
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- BACKPORT (2026-09-13) — Supplier form enrichment (suppliers plan P2).
+-- Provenance: supabase/migrations/20260913_suppliers_gst_bank.sql
+--   gstin / bank details / credit / payment terms / city-state
+-- ═══════════════════════════════════════════════════════════════════════════
+
+alter table public.suppliers
+  add column if not exists gstin          text,
+  add column if not exists bank_name      text,
+  add column if not exists bank_account   text,
+  add column if not exists bank_ifsc      text,
+  add column if not exists credit_limit   numeric(12,2),
+  add column if not exists payment_terms  text,
+  add column if not exists city           text,
+  add column if not exists state          text;
+-- ═══ end supplier form enrichment backport block ═══
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- FOLD-IN (2026-09-18) — Supplier contact PERSONS model (suppliers plan F6).
+-- Provenance: supabase/migrations/20260918_supplier_contact_persons.sql
+--   ek firm me 1+ contact persons; har person ke 1+ mobiles; har deal ka apna
+--   person (PO + payment dono par contact_person_id). Purana supplier_contacts
+--   (flat phone rows) DROP NAHI karta — legacy back-compat ke liye rehta hai.
+--   Sab kuch idempotent (create if not exists / guarded FK + PK do-blocks).
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- ── 1) supplier_contact_persons ──────────────────────────────────────────
+create table if not exists public.supplier_contact_persons (
+  id            bigint generated by default as identity,
+  supplier_id   bigint not null,
+  name          text not null,
+  role          text,
+  notes         text,
+  is_primary    boolean not null default false,
+  date_created  timestamptz not null default now(),
+  date_updated  timestamptz not null default now()
+);
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'supplier_contact_persons_pkey'
+      and conrelid = 'public.supplier_contact_persons'::regclass
+  ) then
+    alter table only public.supplier_contact_persons
+      add constraint supplier_contact_persons_pkey primary key (id);
+  end if;
+end $$;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'supplier_contact_persons_supplier_fk'
+      and conrelid = 'public.supplier_contact_persons'::regclass
+  ) then
+    alter table only public.supplier_contact_persons
+      add constraint supplier_contact_persons_supplier_fk
+      foreign key (supplier_id) references public.suppliers(id)
+      on delete cascade;
+  end if;
+end $$;
+
+create index if not exists supplier_contact_persons_supplier_idx
+  on public.supplier_contact_persons(supplier_id);
+
+create unique index if not exists supplier_contact_persons_name_uidx
+  on public.supplier_contact_persons(supplier_id, lower(trim(name)));
+
+-- ── 2) supplier_contact_phones ───────────────────────────────────────────
+create table if not exists public.supplier_contact_phones (
+  id            bigint generated by default as identity,
+  person_id     bigint not null,
+  phone         text not null,
+  label         text not null default 'Mobile',
+  is_primary    boolean not null default false,
+  date_created  timestamptz not null default now()
+);
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'supplier_contact_phones_pkey'
+      and conrelid = 'public.supplier_contact_phones'::regclass
+  ) then
+    alter table only public.supplier_contact_phones
+      add constraint supplier_contact_phones_pkey primary key (id);
+  end if;
+end $$;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'supplier_contact_phones_person_fk'
+      and conrelid = 'public.supplier_contact_phones'::regclass
+  ) then
+    alter table only public.supplier_contact_phones
+      add constraint supplier_contact_phones_person_fk
+      foreign key (person_id) references public.supplier_contact_persons(id)
+      on delete cascade;
+  end if;
+end $$;
+
+create index if not exists supplier_contact_phones_person_idx
+  on public.supplier_contact_phones(person_id);
+
+create unique index if not exists supplier_contact_phones_phone_uidx
+  on public.supplier_contact_phones(person_id, lower(trim(phone)));
+
+-- ── 3) purchase_orders.contact_person_id ─────────────────────────────────
+alter table public.purchase_orders
+  add column if not exists contact_person_id bigint;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'purchase_orders_contact_person_fk'
+      and conrelid = 'public.purchase_orders'::regclass
+  ) then
+    alter table only public.purchase_orders
+      add constraint purchase_orders_contact_person_fk
+      foreign key (contact_person_id)
+      references public.supplier_contact_persons(id)
+      on delete set null;
+  end if;
+end $$;
+
+create index if not exists purchase_orders_contact_person_idx
+  on public.purchase_orders(contact_person_id);
+
+-- ── 4) supplier_payments.contact_person_id ───────────────────────────────
+alter table public.supplier_payments
+  add column if not exists contact_person_id bigint;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'supplier_payments_contact_person_fk'
+      and conrelid = 'public.supplier_payments'::regclass
+  ) then
+    alter table only public.supplier_payments
+      add constraint supplier_payments_contact_person_fk
+      foreign key (contact_person_id)
+      references public.supplier_contact_persons(id)
+      on delete set null;
+  end if;
+end $$;
+
+create index if not exists supplier_payments_contact_person_idx
+  on public.supplier_payments(contact_person_id);
+
+-- ── 5) touch trigger — supplier_contact_persons.date_updated ─────────────
+create or replace function public.touch_supplier_contact_persons()
+returns trigger language plpgsql as $$
+begin
+  new.date_updated = now();
+  return new;
+end;
+$$;
+
+drop trigger if exists supplier_contact_persons_touch on public.supplier_contact_persons;
+create trigger supplier_contact_persons_touch
+  before update on public.supplier_contact_persons
+  for each row execute function public.touch_supplier_contact_persons();
+
+-- ── 6) RLS — is_frontend_staff() gate (repo pattern) ─────────────────────
+alter table public.supplier_contact_persons enable row level security;
+alter table public.supplier_contact_phones   enable row level security;
+
+drop policy if exists rlslock_supplier_contact_persons_staff on public.supplier_contact_persons;
+create policy rlslock_supplier_contact_persons_staff on public.supplier_contact_persons
+  for all to authenticated
+  using (public.is_frontend_staff())
+  with check (public.is_frontend_staff());
+
+drop policy if exists rlslock_supplier_contact_phones_staff on public.supplier_contact_phones;
+create policy rlslock_supplier_contact_phones_staff on public.supplier_contact_phones
+  for all to authenticated
+  using (public.is_frontend_staff())
+  with check (public.is_frontend_staff());
+
+grant all on table public.supplier_contact_persons to anon;
+grant all on table public.supplier_contact_persons to authenticated;
+grant all on table public.supplier_contact_persons to service_role;
+grant usage on sequence public.supplier_contact_persons_id_seq to anon, authenticated, service_role;
+
+grant all on table public.supplier_contact_phones to anon;
+grant all on table public.supplier_contact_phones to authenticated;
+grant all on table public.supplier_contact_phones to service_role;
+grant usage on sequence public.supplier_contact_phones_id_seq to anon, authenticated, service_role;
+-- ═══ end supplier contact persons fold-in block ═══
+
+-- ═══ FOLD-IN (2026-09-14) - clients page financials RPC + repair_done ═══
+--   get_clients_page_financials(): per-client aggregates for the /clients list.
+--   'repair_done' = SUM(status=2 "Done" job amounts) — INFORMATIONAL, NOT part
+--   of the client balance (balance formula unchanged). create or replace +
+--   grant are idempotent, so this is re-run safe.
+
+create or replace function public.get_clients_page_financials()
+returns jsonb
+language sql
+security definer
+stable
+as $$
+  with active_loans as (
+    select id, client_id, total_payable
+    from public.client_loans
+    where status = 1
+  ),
+  repair_agg as (
+    select
+      case when client_name ~ '^\d+$' then client_name::int else null end as client_id,
+      coalesce(sum(amount), 0) as repair_billed
+    from public.transaction_list
+    where status = 5
+    group by 1
+    having case when client_name ~ '^\d+$' then client_name::int else null end is not null
+  ),
+  done_agg as (
+    select
+      case when client_name ~ '^\d+$' then client_name::int else null end as client_id,
+      coalesce(sum(amount), 0) as repair_done
+    from public.transaction_list
+    where status = 2
+    group by 1
+    having case when client_name ~ '^\d+$' then client_name::int else null end is not null
+  ),
+  direct_agg as (
+    select
+      client_id,
+      coalesce(sum(total_amount), 0) as direct_sales_billed
+    from public.direct_sales
+    group by client_id
+  ),
+  service_pay_agg as (
+    select
+      client_id,
+      coalesce(sum(amount + coalesce(discount, 0)), 0) as service_paid
+    from public.client_payments
+    where loan_id is null or loan_id = 0
+    group by client_id
+  ),
+  loan_given_agg as (
+    select
+      client_id,
+      coalesce(sum(total_payable), 0) as active_loan_given
+    from active_loans
+    group by client_id
+  ),
+  loan_repaid_agg as (
+    select
+      cp.client_id,
+      coalesce(sum(cp.amount + coalesce(cp.discount, 0)), 0) as loan_repaid
+    from public.client_payments cp
+    inner join active_loans al on al.id = cp.loan_id
+    group by cp.client_id
+  ),
+  last_txn_agg as (
+    select
+      case when client_name ~ '^\d+$' then client_name::int else null end as client_id,
+      max(date_created) as last_txn_date
+    from public.transaction_list
+    group by 1
+    having case when client_name ~ '^\d+$' then client_name::int else null end is not null
+  ),
+  all_ids as (
+    select client_id from repair_agg
+    union
+    select client_id from done_agg
+    union
+    select client_id from direct_agg
+    union
+    select client_id from service_pay_agg
+    union
+    select client_id from loan_given_agg
+    union
+    select client_id from loan_repaid_agg
+    union
+    select client_id from last_txn_agg
+  )
+  select coalesce(
+    jsonb_agg(
+      jsonb_build_object(
+        'client_id', i.client_id,
+        'repair_billed', coalesce(r.repair_billed, 0),
+        'repair_done', coalesce(dn.repair_done, 0),
+        'direct_sales_billed', coalesce(d.direct_sales_billed, 0),
+        'service_paid', coalesce(sp.service_paid, 0),
+        'active_loan_given', coalesce(lg.active_loan_given, 0),
+        'loan_repaid', coalesce(lr.loan_repaid, 0),
+        'last_txn_date', lt.last_txn_date
+      )
+      order by i.client_id
+    ),
+    '[]'::jsonb
+  )
+  from all_ids i
+  left join repair_agg r on r.client_id = i.client_id
+  left join done_agg dn on dn.client_id = i.client_id
+  left join direct_agg d on d.client_id = i.client_id
+  left join service_pay_agg sp on sp.client_id = i.client_id
+  left join loan_given_agg lg on lg.client_id = i.client_id
+  left join loan_repaid_agg lr on lr.client_id = i.client_id
+  left join last_txn_agg lt on lt.client_id = i.client_id;
+$$;
+
+grant execute on function public.get_clients_page_financials() to authenticated;
+-- ═══ end clients page financials RPC fold-in block ═══
+
+-- ═══ FOLD-IN (2026-09-19) — expense_list ↔ suppliers link ═══
+--   P4 (suppliers plan): auto-create an Expenses ledger entry from a supplier
+--   payment + trace it back. expense_list.supplier_id bigint nullable FK →
+--   suppliers(id) ON DELETE SET NULL (adjustments/advances need no supplier).
+--   Idempotent. Provenance: 20260919_expense_supplier_link.sql.
+
+alter table public.expense_list
+  add column if not exists supplier_id bigint;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'expense_list_supplier_fk'
+      and conrelid = 'public.expense_list'::regclass
+  ) then
+    alter table only public.expense_list
+      add constraint expense_list_supplier_fk
+      foreign key (supplier_id) references public.suppliers(id)
+      on delete set null;
+  end if;
+end $$;
+
+create index if not exists expense_list_supplier_idx
+  on public.expense_list(supplier_id);
+
+-- ── expense_list.supplier_payment_id ────────────────────────────────────────
+--   Payment → expense traceability + dedup ("Expense entry banao" button on
+--   old payments). Kehta hai kaunsi supplier_payments row ka bana hai.
+alter table public.expense_list
+  add column if not exists supplier_payment_id bigint;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'expense_list_supplier_payment_fk'
+      and conrelid = 'public.expense_list'::regclass
+  ) then
+    alter table only public.expense_list
+      add constraint expense_list_supplier_payment_fk
+      foreign key (supplier_payment_id) references public.supplier_payments(id)
+      on delete set null;
+  end if;
+end $$;
+
+create index if not exists expense_list_supplier_payment_idx
+  on public.expense_list(supplier_payment_id);
+-- ═══ end expense_list ↔ suppliers fold-in block ═══
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- FOLD-IN (2026-09-21) — Client MULTI-CONTACT model (client_contacts).
+-- Provenance: supabase/migrations/20260921_client_contacts.sql
+--   Ek client ke 1+ mobile numbers (family/relative/dost). Flat — suppliers ke
+--   persons+phones mirror NAHI (client khud ek person hai). Ek primary per
+--   client (partial unique index). `client_list.contact` legacy primary
+--   REPLACE nahi hota — back-compat ke liye rehta hai. Sab idempotent.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+create table if not exists public.client_contacts (
+  id            bigint generated by default as identity,
+  client_id     integer not null,
+  name          text,
+  label         text not null default 'Mobile',
+  phone         text not null,
+  is_primary    boolean not null default false,
+  date_created  timestamptz not null default now(),
+  date_updated  timestamptz not null default now()
+);
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'client_contacts_pkey'
+      and conrelid = 'public.client_contacts'::regclass
+  ) then
+    alter table only public.client_contacts
+      add constraint client_contacts_pkey primary key (id);
+  end if;
+end $$;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'client_contacts_client_fk'
+      and conrelid = 'public.client_contacts'::regclass
+  ) then
+    alter table only public.client_contacts
+      add constraint client_contacts_client_fk
+      foreign key (client_id) references public.client_list(id)
+      on delete cascade;
+  end if;
+end $$;
+
+create index if not exists client_contacts_client_idx
+  on public.client_contacts(client_id);
+
+create unique index if not exists client_contacts_phone_uidx
+  on public.client_contacts(client_id, lower(trim(phone)));
+
+create unique index if not exists client_contacts_primary_uidx
+  on public.client_contacts(client_id) where is_primary;
+
+create or replace function public.touch_client_contacts()
+returns trigger language plpgsql as $$
+begin
+  new.date_updated = now();
+  return new;
+end;
+$$;
+
+drop trigger if exists client_contacts_touch on public.client_contacts;
+create trigger client_contacts_touch
+  before update on public.client_contacts
+  for each row execute function public.touch_client_contacts();
+
+alter table public.client_contacts enable row level security;
+
+drop policy if exists rlslock_client_contacts_staff on public.client_contacts;
+create policy rlslock_client_contacts_staff on public.client_contacts
+  for all to authenticated
+  using (public.is_frontend_staff())
+  with check (public.is_frontend_staff());
+
+grant all on table public.client_contacts to anon;
+grant all on table public.client_contacts to authenticated;
+grant all on table public.client_contacts to service_role;
+grant usage on sequence public.client_contacts_id_seq to anon, authenticated, service_role;
+-- ═══ end client_contacts fold-in block ═══
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- FOLD-IN (2026-09-16) — BOM Checker saved templates (bom_templates).
+-- Provenance: supabase/migrations/20260922_bom_templates.sql
+--   Reusable component lists (bom_checker_plan.md Phase 3). items = jsonb
+--   [{ product_id|null, name, qty, notes? }]. created_by nullable → profile
+--   delete par set null. Sab idempotent.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+create table if not exists public.bom_templates (
+  id            bigint generated by default as identity,
+  name          text not null,
+  description   text not null default '',
+  items         jsonb not null default '[]'::jsonb,
+  created_by    uuid,
+  date_created  timestamptz not null default now(),
+  date_updated  timestamptz not null default now()
+);
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'bom_templates_pkey'
+      and conrelid = 'public.bom_templates'::regclass
+  ) then
+    alter table only public.bom_templates
+      add constraint bom_templates_pkey primary key (id);
+  end if;
+end $$;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'bom_templates_creator_fk'
+      and conrelid = 'public.bom_templates'::regclass
+  ) then
+    alter table only public.bom_templates
+      add constraint bom_templates_creator_fk
+      foreign key (created_by) references public.profiles(id)
+      on delete set null;
+  end if;
+end $$;
+
+create index if not exists bom_templates_name_idx
+  on public.bom_templates(name);
+
+create index if not exists bom_templates_creator_idx
+  on public.bom_templates(created_by);
+
+create or replace function public.touch_bom_templates()
+returns trigger language plpgsql as $$
+begin
+  new.date_updated = now();
+  return new;
+end;
+$$;
+
+drop trigger if exists bom_templates_touch on public.bom_templates;
+create trigger bom_templates_touch
+  before update on public.bom_templates
+  for each row execute function public.touch_bom_templates();
+
+alter table public.bom_templates enable row level security;
+
+drop policy if exists rlslock_bom_templates_staff on public.bom_templates;
+create policy rlslock_bom_templates_staff on public.bom_templates
+  for all to authenticated
+  using (public.is_frontend_staff())
+  with check (public.is_frontend_staff());
+
+grant all on table public.bom_templates to anon;
+grant all on table public.bom_templates to authenticated;
+grant all on table public.bom_templates to service_role;
+grant usage on sequence public.bom_templates_id_seq to anon, authenticated, service_role;
+
+-- ── staff_geofence_permit (20260926_staff_geofence_permit.sql) ──
+-- Staff "Outside-Work Permit" — dynamic per-user data, isliye system_info
+-- key-value me nahi, alag table + expiry cleanup.
+-- RLS: sirf SELECT policy (is_frontend_staff()). Koi authenticated INSERT/DELETE
+-- policy NAHI — permit sirf service-role API route (requireAdmin) likhta hai,
+-- staff khud ko permit nahi de sakta. Isi liye ye block pehle se missing tha:
+-- bina is table ke geofence ka permit feature poora kaam hi nahi karta
+-- (api-auth.ts `staff_geofence_permit` query 403/empty deti hai).
+create table if not exists public.staff_geofence_permit (
+  id          bigint generated always as identity,
+  user_id     uuid not null references auth.users(id) on delete cascade,
+  mechanic_id int null,
+  reason      text not null default '',
+  granted_by  uuid references auth.users(id),
+  granted_at  timestamptz not null default now(),
+  expires_at  timestamptz not null,
+  created_at  timestamptz not null default now()
+);
+
+do $$ begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'staff_geofence_permit_pkey'
+      and conrelid = 'public.staff_geofence_permit'::regclass
+  ) then
+    alter table only public.staff_geofence_permit
+      add constraint staff_geofence_permit_pkey primary key (id);
+  end if;
+end $$;
+
+create index if not exists staff_geofence_permit_user_idx
+  on public.staff_geofence_permit(user_id);
+create index if not exists staff_geofence_permit_expiry_idx
+  on public.staff_geofence_permit(expires_at);
+
+alter table public.staff_geofence_permit enable row level security;
+
+drop policy if exists rlslock_geofence_permit_read on public.staff_geofence_permit;
+create policy rlslock_geofence_permit_read on public.staff_geofence_permit
+  for select to authenticated
+  using (public.is_frontend_staff());
+
+grant all on table public.staff_geofence_permit to anon;
+grant all on table public.staff_geofence_permit to authenticated;
+grant all on table public.staff_geofence_permit to service_role;
+grant usage on sequence public.staff_geofence_permit_id_seq to anon, authenticated, service_role;
+
+-- ── Direct Sale: atomic save RPC ──
+-- Client pehle `update direct_sales` -> `delete direct_sale_items` -> `insert`
+-- alag round-trip me karta tha (koi transaction nahi) -> delete pass + insert
+-- fail = line items permanently gayab. Ye ek call me atomic kar deta hai aur
+-- total server par compute karta hai (client ka total trust nahi).
+-- `security invoker` — RLS apni jagah lagta hai (dono tables ki policy
+-- `is_frontend_staff()` hai, to definer se koi zaroorat nahi).
+create or replace function public.save_direct_sale(
+    p_sale_id            integer default null,
+    p_sale_code          text    default null,
+    p_client_id          integer default null,
+    p_mechanic_id        integer default null,
+    p_payment_mode       text    default null,
+    p_remarks            text    default null,
+    p_last_edited_by     integer default null,
+    p_last_edited_by_name text   default null,
+    p_items              jsonb   default null
+) returns integer
+language plpgsql
+security invoker
+set search_path to public
+as $$
+declare
+  v_id    integer;
+  v_item  jsonb;
+  v_total numeric(15,2) := 0;
+  -- Columns `timestamp WITHOUT time zone` hain; readers `fmtIST()` use karte
+  -- hain jo stored value ko IST WALL-CLOCK maankar round-trip karta hai. Isliye
+  -- `now()` ko plain IST wall-clock me cast karo — `now() at time zone 'utc'`
+  -- galat hota (5:30 peeche dikhta). Ye SaleForm ke UTC bug ko bhi theek karta
+  -- hai aur add-direct-sale ke `nowIST()` convention se match karta hai.
+  v_now   timestamp := (now() at time zone 'Asia/Kolkata');
+begin
+  if p_items is null or jsonb_array_length(p_items) = 0 then
+    raise exception 'Sale me kam se kam ek item chahiye.'
+      using errcode = '22023';
+  end if;
+
+  if p_sale_id is null then
+    if p_sale_code is null or btrim(p_sale_code) = '' then
+      raise exception 'Naye sale ke liye sale_code zaroori hai.'
+        using errcode = '22023';
+    end if;
+
+    insert into public.direct_sales (
+      sale_code, client_id, mechanic_id, total_amount, payment_mode,
+      remarks, last_edited_by, last_edited_by_name, last_edited_date,
+      date_created
+    ) values (
+      btrim(p_sale_code), p_client_id, p_mechanic_id, 0, coalesce(p_payment_mode, 'Cash'),
+      nullif(btrim(coalesce(p_remarks, '')), ''), p_last_edited_by,
+      p_last_edited_by_name, v_now, v_now
+    )
+    returning id into v_id;
+  else
+    update public.direct_sales set
+      client_id           = p_client_id,
+      mechanic_id         = p_mechanic_id,
+      payment_mode        = coalesce(p_payment_mode, 'Cash'),
+      remarks             = nullif(btrim(coalesce(p_remarks, '')), ''),
+      last_edited_by      = p_last_edited_by,
+      last_edited_by_name = p_last_edited_by_name,
+      last_edited_date    = v_now
+      -- sale_code / date_created deliberately NAHI bhejte — DB values intact
+    where id = p_sale_id
+    returning id into v_id;
+
+    if v_id is null then
+      raise exception 'Sale #% nahi mila — edit nahi ho sakta.', p_sale_id
+        using errcode = 'P0002';
+    end if;
+
+    delete from public.direct_sale_items where sale_id = p_sale_id;
+  end if;
+
+  for v_item in select * from jsonb_array_elements(p_items) loop
+    insert into public.direct_sale_items (sale_id, product_id, qty, price)
+    values (
+      v_id,
+      nullif(btrim(coalesce(v_item->>'product_id', '')), '')::integer,
+      (v_item->>'qty')::integer,
+      coalesce((v_item->>'price')::numeric, 0)
+    );
+  end loop;
+
+  select coalesce(sum(i.qty * i.price), 0) into v_total
+  from public.direct_sale_items i
+  where i.sale_id = v_id;
+
+  update public.direct_sales set total_amount = v_total where id = v_id;
+
+  return v_id;
+end;
+$$;
+
+grant execute on function public.save_direct_sale(
+  integer, text, integer, integer, text, text, integer, text, jsonb
+) to authenticated;
+-- ═══ end bom_templates fold-in block ═══
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- I6 LOCATION CLEANUP — PHASE 2 (20260925_i6_phase2_place_drop.sql)
+-- Legacy structured place columns ka DROP.
+--
+-- Ye block jaan-boojh kar file ke ANT me rakha hai (create-then-drop order):
+--   * Upar wale sections (20260816 inventory_locations + 20260817
+--     product_level_location + 20260920 inventory_location_cleanup provenance)
+--     in columns ko CREATE karte hain, trigger/function reference karte hain
+--     aur backfill `place_zone -> product_list` bharte hain. Wo backfill ke
+--     liye chahiye, isliye upar ke sections hata nahi sakte.
+--   * 2026-09-25 ke baad app ne `place_*` reads/writes hata diye (commit
+--     801fe7d) aur live DB par ye 8 columns DROP ho chuke hain. Ye block unhe
+--     wapas introduce nahi karta — file ko live schema ke saath align karta hai.
+--   * Saare statements IF EXISTS hain → re-run safe; jis DB par columns
+--     maujood hi nahi (live jaisa) wahan koi error nahi, aur jahan maujood hain
+--     wahan clean remove ho jaate hain.
+--
+-- KEPT (deliberate, 20260925 me documented deviation):
+--   * inventory_list.place (free-text display path) — 10+ app read-points +
+--     get_inventory_stock RPC is par hain. Trigger ise structured se sync
+--     karta tha, isliye drop ke baad display IDENTICAL rehta hai.
+--   * get_inventory_stock RPC unchanged (latest inventory_list.place leta hai).
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- Trigger pehle — ye NEW.place_zone/... reference karta hai; columns ke saath
+-- rehta to har INSERT/UPDATE on inventory_list fail hota.
+drop trigger if exists trig_inventory_place_sync on public.inventory_list;
+drop function if exists public.inventory_sync_place_path();
+
+alter table public.inventory_list
+  drop column if exists place_zone,
+  drop column if exists place_rack,
+  drop column if exists place_bin,
+  drop column if exists place_box;
+
+alter table public.product_list
+  drop column if exists place_zone,
+  drop column if exists place_rack,
+  drop column if exists place_bin,
+  drop column if exists place_box;
+
+-- ── staff_duty_schedule (20261002_staff_duty_schedule.sql) ────────────────
+-- Per-staff default duty time + EFFECTIVE-DATED HISTORY (P2). Salary history
+-- (mechanic_salary_history) ke same pattern: append-only rows with
+-- `effective_from`, `effective_to` column nahi — range read-time derive hota
+-- hai (next-naye row ka effective_from - 1). App fallback: system_info
+-- biz_open/biz_close (src/lib/duty.ts dutyFor()).
+-- RLS: SELECT sab frontend staff ko; INSERT/UPDATE/DELETE sirf admin/developer
+-- (duty salary se juda hai). Detail: 20261002_staff_duty_schedule.sql header.
+create table if not exists public.staff_duty_schedule (
+  id             bigint generated always as identity,
+  mechanic_id    int not null references public.mechanic_list(id) on delete cascade,
+  duty_start     time not null default '10:00',
+  duty_end       time not null default '20:00',
+  break_minutes  int not null default 0,
+  effective_from date not null default CURRENT_DATE,
+  note           text not null default '',
+  created_by     uuid references auth.users(id),
+  created_at     timestamptz not null default now(),
+  constraint staff_duty_schedule_break_ck check (break_minutes >= 0),
+  constraint staff_duty_schedule_mech_from_uniq unique (mechanic_id, effective_from)
+);
+
+do $$ begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'staff_duty_schedule_pkey'
+      and conrelid = 'public.staff_duty_schedule'::regclass
+  ) then
+    alter table only public.staff_duty_schedule
+      add constraint staff_duty_schedule_pkey primary key (id);
+  end if;
+end $$;
+
+create index if not exists staff_duty_schedule_lookup_idx
+  on public.staff_duty_schedule(mechanic_id, effective_from desc);
+
+alter table public.staff_duty_schedule enable row level security;
+
+drop policy if exists rlslock_staff_duty_schedule_read on public.staff_duty_schedule;
+create policy rlslock_staff_duty_schedule_read on public.staff_duty_schedule
+  for select to authenticated
+  using (public.is_frontend_staff());
+
+drop policy if exists rlslock_staff_duty_schedule_ins on public.staff_duty_schedule;
+create policy rlslock_staff_duty_schedule_ins on public.staff_duty_schedule
+  for insert to authenticated
+  with check (
+    public.is_frontend_staff()
+    and exists (
+      select 1 from public.profiles p
+      where p.id = auth.uid() and p.role in ('admin', 'developer')
+    )
+  );
+
+drop policy if exists rlslock_staff_duty_schedule_upd on public.staff_duty_schedule;
+create policy rlslock_staff_duty_schedule_upd on public.staff_duty_schedule
+  for update to authenticated
+  using (
+    public.is_frontend_staff()
+    and exists (
+      select 1 from public.profiles p
+      where p.id = auth.uid() and p.role in ('admin', 'developer')
+    )
+  )
+  with check (
+    public.is_frontend_staff()
+    and exists (
+      select 1 from public.profiles p
+      where p.id = auth.uid() and p.role in ('admin', 'developer')
+    )
+  );
+
+drop policy if exists rlslock_staff_duty_schedule_del on public.staff_duty_schedule;
+create policy rlslock_staff_duty_schedule_del on public.staff_duty_schedule
+  for delete to authenticated
+  using (
+    public.is_frontend_staff()
+    and exists (
+      select 1 from public.profiles p
+      where p.id = auth.uid() and p.role in ('admin', 'developer')
+    )
+  );
+
+grant all on table public.staff_duty_schedule to anon;
+grant all on table public.staff_duty_schedule to authenticated;
+grant all on table public.staff_duty_schedule to service_role;
+grant usage on sequence public.staff_duty_schedule_id_seq to anon, authenticated, service_role;
+
+-- ── user_passkeys (20261018_passkey_login.sql) ────────────────────────────
+-- Staff Passkey / Biometric Login (WebAuthn) — enrollment store.
+-- Plan: docs/plans/passkey_biometric_login_plan.md (+ passkey_sprint_plan.md)
+--
+--  `user_passkeys` — device-attached WebAuthn credentials. Password YAHAN
+--  kabhi store nahi hota.
+--    user_id       - auth.users.id (credential ka maalik)
+--    credential_id - WebAuthn credential ID (base64url, UNIQUE)
+--    public_key    - COSE public key (base64url)
+--    sign_count    - clone/replay guard (monotonic)
+--    transports    - jsonb ['internal','usb',...]
+--    device_name   - user-facing label ("Office PC", "Galaxy A32")
+--
+-- RLS: SELECT-only policies (own + frontend staff); koi browser write nahi
+--      → INSERT/UPDATE/DELETE sirf service_role (server API) se.
+-- Grants: anon/authenticated/service_role + sequence grants.
+-- Idempotent: baar baar run safe. Detail: 20261018_passkey_login.sql header.
+create table if not exists public.user_passkeys (
+  id            bigint generated by default as identity,
+  user_id       uuid not null,
+  credential_id text not null,
+  public_key    text not null,
+  sign_count    bigint not null default 0,
+  transports    jsonb not null default '[]'::jsonb,
+  device_name   text not null default '',
+  last_used_at  timestamptz,
+  date_created  timestamptz not null default now(),
+  date_updated  timestamptz not null default now()
+);
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'user_passkeys_pkey'
+      and conrelid = 'public.user_passkeys'::regclass
+  ) then
+    alter table only public.user_passkeys
+      add constraint user_passkeys_pkey primary key (id);
+  end if;
+end $$;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'user_passkeys_user_fk'
+      and conrelid = 'public.user_passkeys'::regclass
+  ) then
+    alter table only public.user_passkeys
+      add constraint user_passkeys_user_fk
+      foreign key (user_id) references auth.users(id)
+      on delete cascade;
+  end if;
+end $$;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'user_passkeys_credential_id_key'
+      and conrelid = 'public.user_passkeys'::regclass
+  ) then
+    alter table only public.user_passkeys
+      add constraint user_passkeys_credential_id_key unique (credential_id);
+  end if;
+end $$;
+
+create index if not exists user_passkeys_user_idx
+  on public.user_passkeys(user_id);
+
+create index if not exists user_passkeys_credential_idx
+  on public.user_passkeys(credential_id);
+
+-- touch trigger — user_passkeys.date_updated
+create or replace function public.touch_user_passkeys()
+returns trigger language plpgsql as $$
+begin
+  new.date_updated = now();
+  return new;
+end;
+$$;
+
+drop trigger if exists user_passkeys_touch on public.user_passkeys;
+create trigger user_passkeys_touch
+  before update on public.user_passkeys
+  for each row execute function public.touch_user_passkeys();
+
+-- RLS — browser me SIRF read (own + staff); writes service-role only
+alter table public.user_passkeys enable row level security;
+
+drop policy if exists rlslock_user_passkeys_select_own on public.user_passkeys;
+create policy rlslock_user_passkeys_select_own on public.user_passkeys
+  for select to authenticated
+  using (user_id = auth.uid());
+
+drop policy if exists rlslock_user_passkeys_select_staff on public.user_passkeys;
+create policy rlslock_user_passkeys_select_staff on public.user_passkeys
+  for select to authenticated
+  using (public.is_frontend_staff());
+
+grant all on table public.user_passkeys to anon;
+grant all on table public.user_passkeys to authenticated;
+grant all on table public.user_passkeys to service_role;
+grant usage on sequence public.user_passkeys_id_seq to anon, authenticated, service_role;
+
+-- Verify (SQL Editor me chalao):
+--   select relname from pg_class
+--   where relnamespace = 'public'::regnamespace and relname = 'user_passkeys';
+
+-- ── Phase 6 DB indexes (20261018_perf_indexes.sql) ────────────────────────
+-- docs/plans/perf_db_fetch_audit_oct14_2026.md — Navbar universal search +
+-- HOT eq/sort paths ke liye. `pg_trgm` extension upar "Required extension"
+-- section me declare hai (yahan sirf CREATE INDEX).
+--
+-- KYUN
+--   1. Navbar search (src/hooks/useNavbarSearch.ts) har keystroke (300ms
+--      debounce) par 6 tables par multi-column `ILIKE '%q%'` OR chalata hai.
+--      Leading-wildcard ILIKE btree index kabhi use NAHI kar sakta — sirf
+--      pg_trgm GIN. Bina iske har search = sequential scan.
+--   2. Bahut si HOT table par eq/sort ke liye index hi nahi tha —
+--      activity_logs / direct_sales / client_payments / client_loans /
+--      client_list par ZERO index.
+--
+-- KYA NAHI KIYA: koi column drop/rename, koi data change, koi constraint
+--   nahi — sirf CREATE INDEX. `concurrently` NAHI use kiya (Supabase SQL
+--   editor migration ko transaction block me chalata hai; tables abhi chhoti
+--   hain isliye build instant aur lock momentary).
+-- Idempotent: har statement `if not exists` — baar baar run safe.
+-- Detail header: 20261018_perf_indexes.sql
+
+-- NAVBAR SEARCH — pg_trgm GIN (ILIKE '%q%' seq-scan se bachne ke liye)
+-- Har index me wahin columns hain jo useNavbarSearch.ts me ILIKE par hote
+-- hain (ek table = ek index; OR predicates bitmap-OR se use ho jate hain).
+create index if not exists client_list_trgm_idx
+  on public.client_list using gin (
+    firstname gin_trgm_ops, middlename gin_trgm_ops, lastname gin_trgm_ops,
+    contact gin_trgm_ops, address gin_trgm_ops
+  );
+
+create index if not exists transaction_list_trgm_idx
+  on public.transaction_list using gin (
+    item gin_trgm_ops, fault gin_trgm_ops, job_id gin_trgm_ops,
+    code gin_trgm_ops, uniq_id gin_trgm_ops
+  );
+
+create index if not exists product_list_trgm_idx
+  on public.product_list using gin (name gin_trgm_ops);
+
+create index if not exists mechanic_list_trgm_idx
+  on public.mechanic_list using gin (firstname gin_trgm_ops, lastname gin_trgm_ops);
+
+create index if not exists direct_sales_trgm_idx
+  on public.direct_sales using gin (sale_code gin_trgm_ops, remarks gin_trgm_ops);
+
+create index if not exists locations_trgm_idx
+  on public.locations using gin (
+    zone gin_trgm_ops, rack gin_trgm_ops, bin gin_trgm_ops,
+    box gin_trgm_ops, label gin_trgm_ops, code gin_trgm_ops
+  );
+
+-- HOT eq / sort filters (btree) — audit ke "missing index" list se.
+
+-- activity_logs — pehle ZERO index. Jobs list + activity page ke reader.
+-- (Dual-era convention: module 'Jobs' | 'Transactions', meta_id = PK/job_id —
+--  dono module aur meta_id par filter hota hai; date_created par sort.)
+create index if not exists activity_logs_module_action_date_idx
+  on public.activity_logs (module, action, date_created desc);
+
+create index if not exists activity_logs_meta_id_idx
+  on public.activity_logs (meta_id);
+
+-- direct_sales — pehle ZERO index. Client view ka sabse bada unbounded query
+-- (client_name se sales) + navbar search ka sale_code/remarks (trgm se cover).
+create index if not exists direct_sales_client_date_idx
+  on public.direct_sales (client_id, date_created desc);
+
+-- client_payments / client_loans — pehle ZERO index. Client view (har ek
+-- payment/loan client_id par) + jobs list ke financial enrich.
+create index if not exists client_payments_client_date_idx
+  on public.client_payments (client_id, payment_date desc);
+
+create index if not exists client_loans_client_status_idx
+  on public.client_loans (client_id, status);
+
+-- transaction_list — sirf location_id + unique job_id tha. Ye teen hot paths:
+--   client view : client_name se saare jobs (audit: NO LIMIT tha)
+--   jobs list   : del_status=0 (+ status IN) order by date_created desc
+create index if not exists transaction_list_client_date_idx
+  on public.transaction_list (client_name, date_created desc);
+
+create index if not exists transaction_list_del_status_date_idx
+  on public.transaction_list (del_status, date_created desc);
+
+create index if not exists transaction_list_status_date_idx
+  on public.transaction_list (status, date_created desc);
+
+-- child tables: transaction_id par pehle se koi index nahi tha (sirf
+-- transaction_products ka composite unique (transaction_id, product_id) hai,
+-- jo sirf txn-leading query chalta hai — product_id-LEADING nahi).
+create index if not exists transaction_services_txn_idx
+  on public.transaction_services (transaction_id);
+
+create index if not exists transaction_images_txn_idx
+  on public.transaction_images (transaction_id);
+
+create index if not exists transaction_products_product_idx
+  on public.transaction_products (product_id);
+
+-- NOTE (jaan-bujh kar NAHI banaya):
+--   * `delete_flag` / `status`-jaise 2-value flags par btree/partial index —
+--     98% rows active hain, to index scan seq-scan se sasta nahi padta.
+--   * `mechanic_id` (sirf 4 mechanics) — selectivity hi nahi hai.
+-- Inhe tab add karna jab data 10-20x ho jaye aur plan me seq-scan dikhe.
+
+-- Verify (SQL Editor me chalao) — naye indexes dikhne chahiye:
+--
+--   select indexname,
+--          pg_size_pretty(pg_relation_size(quote_ident(indexname)::regclass)) as size
+--   from pg_indexes
+--   where schemaname = 'public' and indexname in (
+--     'client_list_trgm_idx','transaction_list_trgm_idx','product_list_trgm_idx',
+--     'mechanic_list_trgm_idx','direct_sales_trgm_idx','locations_trgm_idx',
+--     'activity_logs_module_action_date_idx','activity_logs_meta_id_idx',
+--     'direct_sales_client_date_idx','client_payments_client_date_idx',
+--     'client_loans_client_status_idx','transaction_list_client_date_idx',
+--     'transaction_services_txn_idx','transaction_products_product_idx'
+--   )
+--   order by indexname;
+--
+--   -- navbar search ka query plan (seq scan hona band ho jana chahiye):
+--   explain (analyze, buffers)
+--   select id, firstname from public.client_list
+--   where delete_flag = 0 and firstname ilike '%ra%';
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- PostgREST ke liye schema reload (Supabase SQL Editor me dabane ke baad
+-- API immediately updated hota hai).
+-- ═══════════════════════════════════════════════════════════════════════════
+NOTIFY pgrst, 'reload schema';
+
+
+-- ============================================================
+-- AI providers (20261028) - drift-safe copy
+-- Source: supabase/migrations/20261028000000_ai_providers.sql
+-- ============================================================
+-- ============================================================
+-- AI providers — multi-provider key storage (28 Oct 2026)
+--
+-- Problem: `system_info` me sirf ek `ai_provider` + ek `ai_api_key` + ek
+-- `ai_model` row thi. Provider switch karne par purani key overwrite ho jaati
+-- thi (ya stale reh jaati thi) — Groq ki key Gemini par lagne se silent
+-- "API key not valid" error aata tha.
+--
+-- Ab: har provider ki apni row (key app-side AES-256-GCM encrypted), aur ek
+-- `is_active` row jo batati hai kaunsa provider use ho raha hai.
+--
+-- USER ACTION: is migration ko Supabase SQL Editor me run karein.
+-- Keys app encrypt karti hai (`AI_KEY_ENC_SECRET`, warna service-role se
+-- derive), isliye SQL me koi plaintext key insert nahi hoti.
+-- ============================================================
+
+create table if not exists public.ai_providers (
+  provider text primary key,
+  label text not null default '',
+  model text not null default '',
+  api_key_cipher text,
+  key_hint text,
+  is_active boolean not null default false,
+  updated_at timestamptz not null default now()
+);
+
+comment on table public.ai_providers is
+  'AI provider settings (multi-provider). API keys app-side AES-256-GCM encrypted; browser ko kabhi plaintext nahi.';
+comment on column public.ai_providers.api_key_cipher is
+  'v1:<iv>:<tag>:<ciphertext> (base64url). Decrypt sirf server par.';
+
+-- Ek waqt me sirf ek provider active ho sakta hai
+create unique index if not exists ai_providers_single_active
+  on public.ai_providers ((is_active))
+  where is_active;
+
+-- RLS: koi policy nahi = anon/authenticated ke liye poora block.
+-- Access sirf service-role se (server routes).
+alter table public.ai_providers enable row level security;
+revoke all on table public.ai_providers from anon, authenticated;
+
+-- Default provider rows
+insert into public.ai_providers (provider, label, model, is_active)
+values
+  ('groq', 'Groq (Free)', 'openai/gpt-oss-120b', false),
+  ('gemini', 'Google Gemini', 'gemini-2.5-flash', false)
+on conflict (provider) do nothing;
+
+-- Legacy state ko naye table me reflect karo (key app migrate karti hai)
+do $$
+declare
+  legacy_provider text;
+  legacy_model text;
+begin
+  if not exists (select 1 from public.ai_providers where is_active) then
+    select meta_value into legacy_provider from public.system_info where meta_field = 'ai_provider';
+    select meta_value into legacy_model from public.system_info where meta_field = 'ai_model';
+
+    update public.ai_providers
+       set is_active = true
+     where provider = coalesce(legacy_provider, 'groq');
+
+    if not exists (select 1 from public.ai_providers where is_active) then
+      update public.ai_providers set is_active = true where provider = 'groq';
+    end if;
+
+    if legacy_model is not null and length(trim(legacy_model)) > 0 then
+      update public.ai_providers
+         set model = legacy_model
+       where provider = coalesce(legacy_provider, 'groq');
+    end if;
+  end if;
+end $$;
+
+NOTIFY pgrst, 'reload schema';
