@@ -1,3 +1,4 @@
+import bundleAnalyzer from "@next/bundle-analyzer";
 import type { NextConfig } from "next";
 
 function supabaseHostname(): string | null {
@@ -49,10 +50,21 @@ const nextConfig: NextConfig = {
             key: "Referrer-Policy",
             value: "strict-origin-when-cross-origin",
           },
+          { key: "X-DNS-Prefetch-Control", value: "off" },
+          {
+            key: "Strict-Transport-Security",
+            value: "max-age=63072000; includeSubDomains",
+          },
+          {
+            key: "Permissions-Policy",
+            value: "camera=(), microphone=(), geolocation=(self)",
+          },
         ],
       },
     ];
   },
 };
 
-export default nextConfig;
+export default bundleAnalyzer({ enabled: process.env.ANALYZE === "true" })(
+  nextConfig,
+);

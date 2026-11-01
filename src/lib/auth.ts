@@ -5,9 +5,10 @@ import { redirect } from "next/navigation";
 
 import { createClient } from "@/lib/supabase/server";
 
-export type AppRole = "admin" | "staff" | "client" | "developer";
+export type { AppRole } from "@/lib/roles";
+export { isStaffRole } from "@/lib/roles";
 
-export const STAFF_ROLES: readonly AppRole[] = ["admin", "staff", "developer"];
+type AppRole = import("@/lib/roles").AppRole;
 
 export type SessionProfile = {
   userId: string;
@@ -52,8 +53,4 @@ export async function requireSession(): Promise<SessionProfile> {
   const session = await getSession();
   if (!session) redirect("/login");
   return session;
-}
-
-export function isStaffRole(role: AppRole) {
-  return STAFF_ROLES.includes(role);
 }

@@ -31,6 +31,18 @@ type Table<Row, Insert = Partial<Row>, Update = Partial<Insert>> = {
 export type Database = {
   public: {
     Tables: {
+      activity_logs: Table<{
+        id: number;
+        user_id: number | null;
+        action: string | null;
+        module: string | null;
+        meta_id: string | null;
+        details: string | null;
+        date_created: string | null;
+        geo_lat: number | null;
+        geo_lng: number | null;
+        geo_distance_m: number | null;
+      }>;
       profiles: Table<{
         id: string;
         full_name: string | null;

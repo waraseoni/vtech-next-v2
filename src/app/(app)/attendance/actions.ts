@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 
 import { isStaffRole, requireSession } from "@/lib/auth";
+import { recordActivity } from "@/lib/data/audit";
 import {
   getGeofence,
   saveAttendance,
@@ -85,6 +86,13 @@ export async function saveAttendanceAction(
     return { error: friendlyError(error, "Attendance save nahi hui.") };
   }
 
+  await recordActivity(session, {
+    module: "Attendance",
+    action: "update",
+    metaId: date,
+    details: `${rows.length} mechanic attendance`,
+  });
+
   revalidatePath("/attendance");
   revalidatePath("/dashboard");
   return {
@@ -136,6 +144,19 @@ export async function selfPunchAction(
           });
 
     if ("error" in result && result.error) return { error: result.error };
+
+    if (!result.alreadyMarked) {
+      await recordActivity(session, {
+        module: "Attendance",
+        action: direction === "in" ? "check-in" : "check-out",
+        metaId: session.profile.mechanic_id,
+        details: point ? `${point.lat}, ${point.lng}` : "Location nahi mili",
+        geo:
+          point && check.distanceM !== null
+            ? { lat: point.lat, lng: point.lng, distanceM: check.distanceM }
+            : null,
+      });
+    }
 
     revalidatePath("/attendance");
     revalidatePath("/dashboard");

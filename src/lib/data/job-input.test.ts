@@ -33,9 +33,9 @@ describe("job input", () => {
     expect(jobInputFromForm(form({ ...base, client_id: "" })).success).toBe(
       false,
     );
-    expect(jobInputFromForm(form({ ...base, services: "not-json" })).success).toBe(
-      false,
-    );
+    expect(
+      jobInputFromForm(form({ ...base, services: "not-json" })).success,
+    ).toBe(false);
     expect(jobInputFromForm(form({ ...base, item: "" })).success).toBe(false);
   });
 

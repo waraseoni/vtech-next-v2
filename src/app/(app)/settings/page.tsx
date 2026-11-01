@@ -1,7 +1,8 @@
-import { Building2, Clock, Database, ShieldCheck } from "lucide-react";
+import { Building2, Clock, Database, ShieldCheck, Users } from "lucide-react";
 import Link from "next/link";
 
 import { SettingsForm } from "@/components/settings/settings-form";
+import { TeamPanel } from "@/components/settings/team-panel";
 import { Badge } from "@/components/ui/badge";
 import {
   Card,
@@ -11,9 +12,12 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { requireSession } from "@/lib/auth";
+import { getMechanicOptions } from "@/lib/data/jobs";
 import { getSettings, getSystemInfo } from "@/lib/data/settings";
 import { resolveMediaUrl } from "@/lib/data/storage";
+import { listTeamMembers } from "@/lib/data/team";
 import { getPublicEnv } from "@/lib/env";
+import { canManageSettings, canManageTeam } from "@/lib/roles";
 import { cn } from "@/lib/utils";
 
 export const metadata = { title: "Settings" };
@@ -21,6 +25,7 @@ export const metadata = { title: "Settings" };
 const TABS = [
   { id: "profile", label: "Business profile", icon: Building2 },
   { id: "attendance", label: "Attendance & geofence", icon: Clock },
+  { id: "team", label: "Team & users", icon: Users },
   { id: "system", label: "System info", icon: Database },
 ] as const;
 
@@ -33,15 +38,20 @@ export default async function SettingsPage({
   const params = await searchParams;
   const tabParam = typeof params.tab === "string" ? params.tab : "";
   const tab: SettingsTab =
-    tabParam === "attendance" || tabParam === "system" ? tabParam : "profile";
-  const canEdit =
-    session.profile.role === "admin" || session.profile.role === "developer";
+    tabParam === "attendance" || tabParam === "team" || tabParam === "system"
+      ? tabParam
+      : "profile";
+  const canEdit = canManageSettings(session.profile.role);
+  const canWriteTab =
+    tab === "team" ? canManageTeam(session.profile.role) : canEdit;
 
-  const [settings, systemInfo] = await Promise.all([
-    tab === "system"
+  const [settings, systemInfo, teamMembers, mechanics] = await Promise.all([
+    tab === "system" || tab === "team"
       ? Promise.resolve<Record<string, string>>({})
       : getSettings(),
     tab === "system" ? getSystemInfo() : Promise.resolve(null),
+    tab === "team" ? listTeamMembers() : Promise.resolve([]),
+    tab === "team" ? getMechanicOptions() : Promise.resolve([]),
   ]);
 
   const supabaseUrl = getPublicEnv().url;
@@ -80,8 +90,11 @@ export default async function SettingsPage({
             </Link>
           );
         })}
-        <Badge variant={canEdit ? "success" : "warning"} className="ml-auto">
-          {canEdit ? "Write access" : "Read-only"}
+        <Badge
+          variant={canWriteTab ? "success" : "warning"}
+          className="ml-auto"
+        >
+          {canWriteTab ? "Write access" : "Read-only"}
         </Badge>
       </div>
 
@@ -135,9 +148,10 @@ export default async function SettingsPage({
                   sirf whitelisted public fields read/write hote hain.
                 </p>
                 <p>
-                  Settings writes app-level gate (admin/developer) se hote hain;
-                  DB RLS staff-write ko allow karta hai, isliye ye defence in
-                  depth hai.
+                  Settings writes app-level admin gate se hote hain. Shared DB
+                  policy (`hardening_sysinfo_staff`) staff ko bhi write deti hai
+                  aur developer ko block karti hai — isliye app gate admin-only
+                  rakha gaya hai (zero-DDL).
                 </p>
                 <p>
                   Uploads `media` bucket (public read, staff write) me jaate
@@ -147,6 +161,12 @@ export default async function SettingsPage({
             </Card>
           </div>
         ) : null
+      ) : tab === "team" ? (
+        <TeamPanel
+          members={teamMembers}
+          mechanics={mechanics}
+          canManage={canManageTeam(session.profile.role)}
+        />
       ) : (
         <SettingsForm
           tab={tab}

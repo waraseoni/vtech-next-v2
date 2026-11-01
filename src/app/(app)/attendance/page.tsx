@@ -426,7 +426,12 @@ export default async function AttendancePage({
           </div>
 
           <Card className="gap-0 overflow-hidden py-0">
-            <div className="overflow-x-auto">
+            <div
+              className="overflow-x-auto"
+              role="region"
+              aria-label="Monthly attendance matrix"
+              tabIndex={0}
+            >
               <table className="w-full border-collapse text-sm">
                 <thead>
                   <tr className="bg-muted/40 text-muted-foreground border-b text-xs">

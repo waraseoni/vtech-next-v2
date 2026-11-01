@@ -143,8 +143,7 @@ export function SettingsForm({
 
       {!canEdit ? (
         <p className="border-warning/30 bg-warning/10 text-warning rounded-md border px-3 py-2 text-sm">
-          Read-only: settings save karne ka access sirf admin/developer ke paas
-          hai.
+          Read-only: settings save karne ka access sirf admin ke paas hai.
         </p>
       ) : null}
       {state.error ? (

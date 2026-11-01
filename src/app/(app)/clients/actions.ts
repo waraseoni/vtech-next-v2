@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
 import { isStaffRole, requireSession } from "@/lib/auth";
+import { recordActivity } from "@/lib/data/audit";
 import { clientInputFromForm } from "@/lib/data/client-input";
 import {
   createClientRecord,
@@ -13,6 +14,7 @@ import {
   uploadClientPhoto,
 } from "@/lib/data/clients";
 import { DataError } from "@/lib/data/errors";
+import { canDeleteRecords } from "@/lib/roles";
 
 export type ClientFormState = { error: string | null };
 export type DeleteClientState = { error: string | null };
@@ -91,6 +93,16 @@ export async function saveClientAction(
     return { error: "Client save nahi hua. Dobara try karein." };
   }
 
+  const clientName = [data.firstname, data.middlename, data.lastname]
+    .filter(Boolean)
+    .join(" ");
+  await recordActivity(session, {
+    module: "Clients",
+    action: id > 0 ? "update" : "create",
+    metaId: targetId,
+    details: `${clientName} (${data.contact})`,
+  });
+
   revalidatePath("/clients");
   revalidatePath(`/clients/${targetId}`);
   redirect(`/clients/${targetId}`);
@@ -101,10 +113,7 @@ export async function deleteClientAction(
   formData: FormData,
 ): Promise<DeleteClientState> {
   const session = await requireSession();
-  if (
-    session.profile.role !== "admin" &&
-    session.profile.role !== "developer"
-  ) {
+  if (!canDeleteRecords(session.profile.role)) {
     return { error: "Delete sirf admin/developer kar sakta hai." };
   }
 
@@ -116,6 +125,13 @@ export async function deleteClientAction(
   } catch {
     return { error: "Client delete nahi hua. Dobara try karein." };
   }
+
+  await recordActivity(session, {
+    module: "Clients",
+    action: "delete",
+    metaId: id,
+    details: "Soft delete (delete_flag=1)",
+  });
 
   revalidatePath("/clients");
   revalidatePath(`/clients/${id}`);

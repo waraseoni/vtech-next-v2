@@ -36,6 +36,7 @@ import {
 } from "@/lib/domain/client";
 import { getPublicEnv } from "@/lib/env";
 import { formatINR } from "@/lib/money";
+import { canDeleteRecords } from "@/lib/roles";
 import { cn } from "@/lib/utils";
 
 export const metadata = { title: "Client" };
@@ -120,8 +121,7 @@ export default async function ClientDetailPage({
     `Namaste ${client.firstname}, V-Tech se.`,
   );
   const canDelete =
-    isStaffRole(session.profile.role) &&
-    (session.profile.role === "admin" || session.profile.role === "developer");
+    isStaffRole(session.profile.role) && canDeleteRecords(session.profile.role);
   const dueLabel = balance.due < 0 ? "Advance" : "Due";
 
   return (

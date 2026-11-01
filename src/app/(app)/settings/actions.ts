@@ -3,18 +3,19 @@
 import { revalidatePath, updateTag } from "next/cache";
 import { z } from "zod";
 
-import { requireSession, type AppRole } from "@/lib/auth";
+import { requireSession } from "@/lib/auth";
+import { recordActivity } from "@/lib/data/audit";
 import { DataError } from "@/lib/data/errors";
 import { saveSettings, type SettingsMap } from "@/lib/data/settings";
 import { uploadMediaImage } from "@/lib/data/storage";
+import { createTeamUser } from "@/lib/data/team";
 import { isValidDuty, normTime } from "@/lib/domain/duty";
+import { canManageSettings, canManageTeam } from "@/lib/roles";
 
 export type SettingsActionState = {
   error: string | null;
   message?: string;
 };
-
-const SETTINGS_ROLES: readonly AppRole[] = ["admin", "developer"];
 
 const profileSchema = z.object({
   name: z
@@ -50,12 +51,21 @@ const attendanceSchema = z.object({
 
 function friendlyError(error: unknown, fallback: string) {
   if (error instanceof DataError) {
-    return error.message.replace(/^[\w.]+:\s*/, "");
+    const message = error.message.replace(/^[\w.]+:\s*/, "");
+    if (/already|registered|exists/i.test(message)) {
+      return "Ye email pehle se registered hai.";
+    }
+    return message;
   }
   if (error instanceof z.ZodError) {
     return error.issues[0]?.message ?? fallback;
   }
-  if (error instanceof Error && error.message) return error.message;
+  if (error instanceof Error && error.message) {
+    if (error.message.includes("SUPABASE_SECRET_KEY")) {
+      return "Server par service-role key set nahi hai (SUPABASE_SECRET_KEY).";
+    }
+    return error.message;
+  }
   return fallback;
 }
 
@@ -69,10 +79,8 @@ export async function saveSettingsAction(
   formData: FormData,
 ): Promise<SettingsActionState> {
   const session = await requireSession();
-  if (!SETTINGS_ROLES.includes(session.profile.role)) {
-    return {
-      error: "Settings save karne ka access sirf admin/developer ke paas hai.",
-    };
+  if (!canManageSettings(session.profile.role)) {
+    return { error: "Settings save karne ka access sirf admin ke paas hai." };
   }
 
   const tab = formData.get("tab");
@@ -87,12 +95,81 @@ export async function saveSettingsAction(
         : parseAttendance(formData);
 
     await saveSettings(entries);
+    await recordActivity(session, {
+      module: "Settings",
+      action: "update",
+      metaId: tab,
+      details: Object.keys(entries).join(", "),
+    });
     updateTag("system-info");
     revalidatePath("/settings");
     revalidatePath("/", "layout");
     return { error: null, message: "Settings save ho gayi." };
   } catch (error) {
     return { error: friendlyError(error, "Settings save nahi hui.") };
+  }
+}
+
+const teamSchema = z.object({
+  email: z.email("Email sahi nahi hai."),
+  password: z.string().min(8, "Password kam se kam 8 characters ka rakhein."),
+  full_name: z
+    .string()
+    .trim()
+    .min(2, "Full name likhiye.")
+    .max(80, "Full name 80 characters se chhota rakhein."),
+  role: z.enum(["admin", "staff", "developer"]),
+  mechanic_id: z.string().trim(),
+});
+
+export async function createUserAction(
+  _previous: SettingsActionState,
+  formData: FormData,
+): Promise<SettingsActionState> {
+  const session = await requireSession();
+  if (!canManageTeam(session.profile.role)) {
+    return { error: "User create karne ka access sirf admin ke paas hai." };
+  }
+
+  try {
+    const parsed = teamSchema.parse({
+      email: String(formData.get("email") ?? ""),
+      password: String(formData.get("password") ?? ""),
+      full_name: String(formData.get("full_name") ?? ""),
+      role: String(formData.get("role") ?? ""),
+      mechanic_id: String(formData.get("mechanic_id") ?? ""),
+    });
+
+    const mechanicId = parsed.mechanic_id ? Number(parsed.mechanic_id) : null;
+    if (
+      mechanicId !== null &&
+      (!Number.isSafeInteger(mechanicId) || mechanicId <= 0)
+    ) {
+      return { error: "Mechanic selection sahi nahi hai." };
+    }
+
+    const created = await createTeamUser({
+      email: parsed.email,
+      password: parsed.password,
+      fullName: parsed.full_name,
+      role: parsed.role,
+      mechanicId,
+    });
+
+    await recordActivity(session, {
+      module: "Team",
+      action: "create",
+      metaId: created.id,
+      details: `${parsed.email} · ${parsed.role}`,
+    });
+
+    revalidatePath("/settings");
+    return {
+      error: null,
+      message: `${parsed.email} ka account ban gaya (${parsed.role}).`,
+    };
+  } catch (error) {
+    return { error: friendlyError(error, "User create nahi hua.") };
   }
 }
 

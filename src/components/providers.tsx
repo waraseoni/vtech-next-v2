@@ -5,7 +5,13 @@ import { ThemeProvider } from "next-themes";
 import { useState } from "react";
 import { Toaster } from "sonner";
 
-export function Providers({ children }: { children: React.ReactNode }) {
+export function Providers({
+  nonce,
+  children,
+}: {
+  nonce?: string;
+  children: React.ReactNode;
+}) {
   const [queryClient] = useState(
     () =>
       new QueryClient({
@@ -26,6 +32,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
       defaultTheme="system"
       enableSystem
       disableTransitionOnChange
+      nonce={nonce}
     >
       <QueryClientProvider client={queryClient}>
         {children}

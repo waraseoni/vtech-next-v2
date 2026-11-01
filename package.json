@@ -17,6 +17,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
+    "test:lhci": "lhci autorun",
+    "size": "node --max-old-space-size=4096 ./node_modules/size-limit/bin.js",
+    "analyze": "node scripts/analyze.mjs",
     "check": "npm run typecheck && npm run lint && npm run test"
   },
   "dependencies": {
@@ -70,5 +73,17 @@
     "typescript": "6.0.3",
     "vite": "8.3.5",
     "vitest": "5.0.5"
-  }
+  },
+  "size-limit": [
+    {
+      "name": "shared chunks",
+      "path": ".next/static/chunks/*.js",
+      "limit": "320 kB"
+    },
+    {
+      "name": "global css",
+      "path": ".next/static/chunks/*.css",
+      "limit": "60 kB"
+    }
+  ]
 }

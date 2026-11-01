@@ -29,6 +29,7 @@ import { resolveMediaUrl } from "@/lib/data/storage";
 import { formatIST } from "@/lib/date";
 import { getPublicEnv } from "@/lib/env";
 import { formatINR, lineTotal, sumMoney } from "@/lib/money";
+import { canDeleteRecords } from "@/lib/roles";
 
 export const metadata = { title: "Job" };
 
@@ -68,8 +69,7 @@ export default async function JobDetailPage({
   const productTotal = sumMoney(
     products.map((line) => lineTotal(line.qty, line.price)),
   );
-  const canDelete =
-    session.profile.role === "admin" || session.profile.role === "developer";
+  const canDelete = canDeleteRecords(session.profile.role);
 
   const steps = [
     { status: 0, label: "Created", date: job.date_created },

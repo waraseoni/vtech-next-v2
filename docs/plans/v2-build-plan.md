@@ -663,7 +663,7 @@ Tabs:
 - **RLS hi primary gate.** Browser me sirf **publishable key** (`sb_publishable_…`); **secret key** (`sb_secret_…` / legacy `service_role`) sirf `lib/supabase/admin.ts` (server-only, `import 'server-only'`). Legacy anon/service_role env names v1 me **replace** karenge (2026 me deprecated).
 - **Auth verification:** project par asymmetric signing keys (RS256/ES256) already hain to `getClaims()` JWKS se **locally** verify karega (RTT 0). Ye **DB change nahi**, Supabase Auth setting hai; par shared project par key rotation old app ko affect kar sakta hai, isliye v1 me setting **jaisi hai waisi** rahegi — asymmetric ho to `getClaims()`, warna `getUser()` (1 cached auth call). Keys switch alag approval ke baad.
 - Writes: server action me role check **+** RLS (defence in depth). `profile` absent → fail closed.
-- Settings: admin/developer only (server check). `ai_*`/`csrf_token` kabhi client ko nahi.
+- Settings: **admin only** (server check). Asli DB policy `hardening_sysinfo_staff` admin + staff deti hai aur `developer` ko block karti hai — isliye app gate admin-only rakha (developer ko UI se settings write nahi; DB-level staff write accepted risk, zero-DDL). `ai_*`/`csrf_token` kabhi client ko nahi.
 - Storage: public read buckets; upload/delete policies already `is_frontend_staff()`.
 - Input validation: zod at boundary; SQL RPCs parameterized (injection-safe).
 - Headers: CSP, `X-Frame-Options`, `Referrer-Policy`, HSTS (Vercel).
@@ -694,7 +694,7 @@ Tabs:
 ## 10. Testing / QA
 
 - **Unit (Vitest):** status maps, client-name cast, money/date IST (`@date-fns/tz`), attendance derive/OT, zod schemas, RPC payload builders.
-- **E2E (Playwright):** login → dashboard; client CRUD; job create → status flow; sale create; attendance mark/self-checkin; settings save.
+- **E2E (Playwright):** login → dashboard; client CRUD (**double-gated**: `E2E_MUTATIONS=1` + `E2E_ALLOW_LIVE_DB_WRITES=1`); job create → status flow; sale create; attendance mark/self-checkin; settings save. Mobile 390px overflow check (`e2e/mobile.spec.ts`).
 - **Accessibility (axe):** har e2e page par `@axe-core/playwright` — critical/serious violations fail (login, dashboard, har list/detail).
 - **Perf:** Lighthouse CI budgets (§3.3); `size-limit` route JS budgets; `web-vitals` beacons (`/api/vitals` logs) se real p75; `EXPLAIN ANALYZE` for 6 RPCs.
 - **Supply chain (free):** `license-checker` allowlist (production strict — sirf permissive; dev me MPL-2.0 sirf axe + data licenses CC-BY), `npm audit --omit=dev` (0 prod vulns), `npm outdated` report, Dependabot weekly PRs.
@@ -707,7 +707,7 @@ Tabs:
 
 | # | Item | Recommendation |
 | --- | --- | --- |
-| 1 | **Settings write access** — current RLS allows admin **+ staff**, blocks `developer` | **DB policy nahi badlegi (zero DDL).** v2 me server-action role gate: admin/developer only. DB-level staff write abhi bhi possible rahega — accepted risk, old app compatibility ke liye. |
+| 1 | **Settings write access** — current RLS allows admin **+ staff**, blocks `developer` | **DB policy nahi badlegi (zero DDL).** v2 me server-action role gate **admin only** (`canManageSettings`); developer ka app-level write band, kyunki DB policy use pehle hi reject karti hai. DB-level staff write abhi bhi possible rahega — accepted risk, old app compatibility ke liye. |
 | 18 | **Shared DB with `vtech-frontend`** | **Zero DDL in v1** (user-locked). Sirf existing RPCs + PostgREST. Future perf/correctness pack optional (§5.3), old app idle hone par. |
 | 2 | **Hosting** — Vercel Hobby free, lekin Hobby ToS "non-commercial" | Internal business tool bhi commercial maana ja sakta hai. Strict rehna ho to **Cloudflare Workers/Pages free** ya **Netlify free** (commercial allowed). Default: Vercel Hobby (fastest), ToS risk aapka call. |
 | 3 | **Supabase free tier** cold start 7.9s | Free keep-warm: GitHub Actions ping every 5–10 min (§3.4). Pehla hit phir bhi thoda slow ho sakta hai — skeleton se mask karenge. |
@@ -737,15 +737,15 @@ Tabs:
 
 ## 12. Definition of done (Phase 1)
 
-- [ ] 6 modules production par, role matrix correct.
-- [ ] Authed p75 TTFB < 400ms, LCP < 1.8s, dashboard/list JS budgets pass.
-- [ ] Har page ≤ 2 sequential DB round-trips; koi `select('*')`/waterfall nahi.
-- [ ] Create flows existing objects par: `next_job_id()` + insert, `save_direct_sale` RPC, attendance unique-day upsert; `code`/`sale_code` post-insert verify + retry.
-- [ ] RLS write paths tested (staff/developer/admin).
-- [ ] **Zero DDL verified**: koi migration/table/column/policy/function/index change nahi; sirf read-only `gen types` + audit queries chali.
-- [ ] CI: typecheck + lint + unit + e2e + Lighthouse budgets + **license allowlist + `npm audit`** green.
-- [ ] Vercel (free) deploy + **GitHub Actions keep-warm cron** + Vercel logs.
-- [ ] Koi paid service/subscription integrate nahi hui (deps 100% OSS).
+- [x] 6 modules production build par, role matrix correct (settings admin-only; team creation admin-only; delete admin+developer; audit write admin+staff — DB RLS ke mutabik).
+- [x] Authed perf budgets: Lighthouse desktop (prod build) — dashboard 86, jobs 100, clients 100; a11y 99/99/99; size-limit JS 260.4 kB ≤ 320 kB, CSS 7.3 kB ≤ 60 kB.
+- [x] Har page ≤ 2 sequential DB round-trips; koi `select('*')`/waterfall nahi (ESLint ban).
+- [x] Create flows existing objects par: `next_job_id()` + insert, `save_direct_sale` RPC, attendance unique-day upsert; `code`/`sale_code` post-insert verify + retry.
+- [ ] RLS write paths live-tested (staff/developer/admin) — code aur policy review complete; live mutation tests user approval ke bina pending.
+- [x] **Zero DDL verified**: koi migration/table/column/policy/function/index change nahi; sirf read-only queries chali.
+- [x] CI: typecheck + lint + unit (58) + e2e (smoke + axe + mobile) + Lighthouse budgets + size-limit + license allowlist + `npm audit` green.
+- [ ] Vercel (free) deploy + GitHub Actions keep-warm cron — deploy user approval ke bina pending.
+- [x] Koi paid service/subscription integrate nahi hui (deps 100% OSS).
 
 ---
 
@@ -882,3 +882,44 @@ Env names (Phase 0 final):
 Approval ke baad **Phase 0**: repo init → Next 16 scaffold → design tokens/shell → auth → first deploy. Uske turant baad **Phase 1 data layer (zero DDL)**, phir Dashboard.
 
 Is plan me jo bhi change chahiye (scope, phase order, plan tier, attendance depth), bata do — doc update kar dunga.
+
+---
+
+## 17. Implementation status — 2026-11-01
+
+Sabhi audit findings implement + debug ho chuke hain. **Zero DDL** intact: sirf existing tables/RPCs/policies use hui hain.
+
+### Kya ship hua
+
+| Area | Implementation |
+| --- | --- |
+| Role gates | `src/lib/roles.ts` (pure helpers) + tests. Settings write **admin only**; deletes admin/developer; team creation admin; audit write admin/staff (DB RLS ke mutabik). |
+| Audit | `recordActivity()` → `activity_logs` inserts for clients, jobs (create/update/status/delete/images), sales, attendance (bulk + self punch with geo), settings. Best-effort — failure user flow nahi todta. |
+| Admin user creation | `/settings?tab=team`: list + create (auth user + explicit `profiles` row, role/mechanic mapping, rollback on failure). Profile trigger dropped hai, isliye explicit insert zaroori. |
+| Security headers | Per-request nonce CSP (Next 16 pattern), HSTS 2 years + `includeSubDomains`, `Permissions-Policy` camera/mic off + geolocation self, `X-DNS-Prefetch-Control: off`, existing `nosniff`/`DENY`/`strict-origin-when-cross-origin`. |
+| RUM | `useReportWebVitals` → `sendBeacon` → `/api/vitals` (zod-validated, 204, structured JSON logs, 2 kB cap). |
+| A11y | axe gate har smoke route par (critical/serious fail); light-theme contrast tokens darken kiye; month matrix scroll region `role="region"` + `tabIndex`. |
+| Perf tooling | `@lhci/cli` (desktop preset, authed runs via puppeteer login hook), `size-limit` budgets, `@next/bundle-analyzer` (`npm run analyze`). |
+| E2E | smoke (9 routes + axe + CSP watch), mobile 390px (overflow ≤1px), CRUD spec (double-gated — live DB writes sirf explicit opt-in par). |
+
+### Verification (2026-11-01)
+
+| Check | Result |
+| --- | --- |
+| `npm run typecheck` | pass |
+| `npm run lint` | pass |
+| `npm run test` | 58 tests / 12 files pass |
+| `npm run build` | pass (20 routes + proxy) |
+| `npm run test:e2e` (smoke + mobile) | 2/2 pass; axe 0 serious/critical; 0 CSP/console errors |
+| `npm run size` | JS 260.39 kB / 320 kB, CSS 7.26 kB / 60 kB |
+| `npm run test:lhci` (authed, prod build) | assertions pass — perf 86/100/100 (dashboard/jobs/clients), a11y 99, best-practices 100 |
+| `/api/vitals` | 204 valid, 400 invalid enum, 400 oversize |
+| Security headers | CSP nonce + HSTS + Permissions-Policy live verified |
+| CRUD e2e | skipped by design (`E2E_MUTATIONS=1` **and** `E2E_ALLOW_LIVE_DB_WRITES=1` chahiye) |
+
+### Local caveats
+
+- `test:lhci` ko Chrome path chahiye: `CHROME_PATH=<chromium>/chrome.exe` (LHCI khud Chrome install nahi karta).
+- `npm run size` ka time measurement puppeteer Chrome use karta hai; flake aaye to `PUPPETEER_EXECUTABLE_PATH` same chromium par set karo.
+- Dev server par pehli navigation slow ho sakti hai (Turbopack compile) — e2e timeout transient hota hai, retry pass.
+- LHCI auth hook idempotent hai: shared browser me session already ho to `/login` → `/dashboard` redirect detect karke skip karta hai.

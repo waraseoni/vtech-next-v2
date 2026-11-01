@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
 import { isStaffRole, requireSession } from "@/lib/auth";
+import { recordActivity } from "@/lib/data/audit";
 import { DataError } from "@/lib/data/errors";
 import { saleInputFromForm } from "@/lib/data/sale-input";
 import { createSale, updateSale } from "@/lib/data/sales";
@@ -56,6 +57,17 @@ export async function saveSaleAction(
       saleId > 0
         ? await updateSale({ ...payload, saleId })
         : await createSale(payload);
+
+    await recordActivity(session, {
+      module: "Sales",
+      action: saleId > 0 ? "update" : "create",
+      metaId: result.id,
+      details:
+        "saleCode" in result
+          ? `${result.saleCode} · ${data.items.length} item(s)`
+          : `${data.items.length} item(s)`,
+    });
+
     revalidatePath("/sales");
     revalidatePath(`/sales/${result.id}`);
     revalidatePath("/clients");

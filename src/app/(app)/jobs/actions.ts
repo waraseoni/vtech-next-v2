@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
 import { isStaffRole, requireSession } from "@/lib/auth";
+import { recordActivity } from "@/lib/data/audit";
 import { DataError } from "@/lib/data/errors";
 import { jobInputFromForm } from "@/lib/data/job-input";
 import {
@@ -18,6 +19,7 @@ import {
 } from "@/lib/data/jobs";
 import { createClient } from "@/lib/supabase/server";
 import { canTransitionJobStatus, isJobStatus } from "@/lib/constants/status";
+import { canDeleteRecords } from "@/lib/roles";
 
 export type JobFormState = { error: string | null };
 export type JobActionState = { error: string | null; ok?: boolean };
@@ -85,6 +87,7 @@ export async function saveJobAction(
   }
 
   let targetId = jobId;
+  let jobCode: string | null = null;
   try {
     if (jobId > 0) {
       await updateJob(jobId, input);
@@ -95,6 +98,7 @@ export async function saveJobAction(
         userId: session.profile.mechanic_id ?? 0,
       });
       targetId = created.id;
+      jobCode = created.code;
       if (uploads.length) await attachUploadedJobImages(created.id, uploads);
     }
   } catch (error) {
@@ -102,6 +106,13 @@ export async function saveJobAction(
       error: friendlyError(error, "Job save nahi hua. Dobara try karein."),
     };
   }
+
+  await recordActivity(session, {
+    module: "Jobs",
+    action: jobId > 0 ? "update" : "create",
+    metaId: targetId,
+    details: [jobCode, data.item].filter(Boolean).join(" · "),
+  });
 
   revalidatePath("/jobs");
   revalidatePath(`/jobs/${targetId}`);
@@ -142,6 +153,13 @@ export async function updateJobStatusAction(
     return { error: friendlyError(error, "Status update nahi hua.") };
   }
 
+  await recordActivity(session, {
+    module: "Jobs",
+    action: "status",
+    metaId: id,
+    details: `${current.data.status} → ${statusRaw}`,
+  });
+
   revalidatePath("/jobs");
   revalidatePath(`/jobs/${id}`);
   revalidatePath("/dashboard");
@@ -153,10 +171,7 @@ export async function deleteJobAction(
   formData: FormData,
 ): Promise<JobActionState> {
   const session = await requireSession();
-  if (
-    session.profile.role !== "admin" &&
-    session.profile.role !== "developer"
-  ) {
+  if (!canDeleteRecords(session.profile.role)) {
     return { error: "Delete sirf admin/developer kar sakta hai." };
   }
 
@@ -168,6 +183,13 @@ export async function deleteJobAction(
   } catch (error) {
     return { error: friendlyError(error, "Job delete nahi hua.") };
   }
+
+  await recordActivity(session, {
+    module: "Jobs",
+    action: "delete",
+    metaId: id,
+    details: "Soft delete (del_status=1)",
+  });
 
   revalidatePath("/jobs");
   revalidatePath("/dashboard");
@@ -193,6 +215,13 @@ export async function deleteJobImageAction(
     return { error: friendlyError(error, "Image delete nahi hui.") };
   }
 
+  await recordActivity(session, {
+    module: "Jobs",
+    action: "delete",
+    metaId: jobId,
+    details: `Image #${imageId} hatayi`,
+  });
+
   revalidatePath(`/jobs/${jobId}`);
   return { error: null, ok: true };
 }
@@ -216,6 +245,13 @@ export async function addJobImagesAction(
   } catch (error) {
     return { error: friendlyError(error, "Images upload nahi hui.") };
   }
+
+  await recordActivity(session, {
+    module: "Jobs",
+    action: "upload",
+    metaId: jobId,
+    details: `${files.length} image upload`,
+  });
 
   revalidatePath(`/jobs/${jobId}`);
   return { error: null, ok: true };
