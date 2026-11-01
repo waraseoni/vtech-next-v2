@@ -425,6 +425,7 @@ Rules:
 - CI gate (blocking):
   - **Production deps:** `license-checker --production --excludePrivatePackages --onlyAllow "MIT;Apache-2.0;ISC;BSD-2-Clause;BSD-3-Clause;0BSD;Unlicense;CC0-1.0;CC-BY-4.0"` — runtime me koi MPL/copyleft/paid nahi. (`CC-BY-4.0` = `caniuse-lite` data, permissive.)
   - **Dev deps:** same + `BSD;CC-BY-3.0;MPL-2.0;Python-2.0;BlueOak-1.0.0` — `MPL-2.0` sirf `@axe-core/playwright` ke liye (dev-only, shipped nahi); baaki transitive metadata/data licenses hain.
+  - **Known exception:** `sharp` ke prebuilt `@img/sharp-libvips-*` binaries (Linux/macOS, dynamically linked) `LGPL-3.0-or-later` hain. `ci.yml` me sirf yehi artifacts `--excludePackages` se gate ke bahar hain (exact `package@version` list). Sharp/libvips bump par list update karni hoti hai — gate jaan-boojh kar red hota hai taaki exception review ho.
   - `npm audit --omit=dev --audit-level=high` (currently **0 production vulnerabilities**) + `npm outdated` **report** (non-blocking, review ke liye).
 - Node `.nvmrc` = `24`; `engines.node >= 24.15.0` (jsdom 30 transitive requirement); Vercel project Node 24.
 

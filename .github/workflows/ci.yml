@@ -16,6 +16,11 @@ jobs:
       NEXT_PUBLIC_SUPABASE_URL: https://ci.supabase.co
       NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: sb_publishable_ci_dummy
       SUPABASE_SECRET_KEY: sb_secret_ci_dummy
+      # sharp ke prebuilt libvips binaries platform-specific hain aur LGPL-3.0-or-later
+      # ke under aate hain (dynamically linked, sirf server par). Sirf inhi known
+      # artifacts ko gate se exclude karte hain; sharp bump par version yahan update
+      # karna hoga — tab gate intentionally red hoga taaki review ho.
+      LICENSE_EXCLUDE_PACKAGES: "@img/sharp-libvips-darwin-arm64@1.3.4;@img/sharp-libvips-darwin-x64@1.3.4;@img/sharp-libvips-linux-arm@1.3.4;@img/sharp-libvips-linux-arm64@1.3.4;@img/sharp-libvips-linux-ppc64@1.3.4;@img/sharp-libvips-linux-riscv64@1.3.4;@img/sharp-libvips-linux-s390x@1.3.4;@img/sharp-libvips-linux-x64@1.3.4;@img/sharp-libvips-linuxmusl-arm64@1.3.4;@img/sharp-libvips-linuxmusl-x64@1.3.4"
     steps:
       - uses: actions/checkout@v4
 
@@ -39,12 +44,14 @@ jobs:
         run: >
           npx --no-install license-checker
           --production --excludePrivatePackages
+          --excludePackages "$LICENSE_EXCLUDE_PACKAGES"
           --onlyAllow "MIT;Apache-2.0;ISC;BSD-2-Clause;BSD-3-Clause;0BSD;Unlicense;CC0-1.0;CC-BY-4.0"
 
       - name: License gate (all deps)
         run: >
           npx --no-install license-checker
           --excludePrivatePackages
+          --excludePackages "$LICENSE_EXCLUDE_PACKAGES"
           --onlyAllow "MIT;Apache-2.0;ISC;BSD;BSD-2-Clause;BSD-3-Clause;0BSD;Unlicense;CC0-1.0;CC-BY-4.0;CC-BY-3.0;MPL-2.0;Python-2.0;BlueOak-1.0.0"
 
       - name: Production audit
