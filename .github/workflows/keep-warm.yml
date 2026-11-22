@@ -11,4 +11,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Ping health endpoint
-        run: curl -fsS --max-time 20 "${{ secrets.APP_HEALTH_URL }}"
+        env:
+          APP_HEALTH_URL: ${{ secrets.APP_HEALTH_URL }}
+        run: |
+          if [ -z "$APP_HEALTH_URL" ]; then
+            echo "APP_HEALTH_URL secret not configured — deploy pending, skipping."
+            exit 0
+          fi
+          curl -fsS --max-time 20 "$APP_HEALTH_URL"
