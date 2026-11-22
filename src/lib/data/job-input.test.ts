@@ -10,6 +10,7 @@ function form(values: Record<string, string>) {
 
 const base = {
   client_id: "42",
+  service_type_id: "1",
   item: "Samsung fridge",
   fault: "Cooling nahi kar raha",
   services: JSON.stringify([{ serviceId: 1, name: "Checkup", price: 300 }]),
@@ -43,6 +44,7 @@ describe("job input", () => {
     const parsed = jobInputSchema.safeParse({
       clientId: 1,
       mechanicId: 7,
+      serviceTypeId: 1,
       item: "AC",
       fault: "Noise",
       commissionAmount: 120.5,
@@ -53,6 +55,34 @@ describe("job input", () => {
     if (parsed.success) {
       expect(parsed.data.mechanicId).toBe(7);
       expect(parsed.data.commissionAmount).toBe(120.5);
+    }
+  });
+
+  it("requires a service type and parses device/warranty fields", () => {
+    expect(
+      jobInputFromForm(form({ ...base, service_type_id: "" })).success,
+    ).toBe(false);
+
+    const parsed = jobInputFromForm(
+      form({
+        ...base,
+        brand_id: "3",
+        item_category: "Scooter",
+        model: "XGT",
+        serial_no: "KMK123456",
+        warranty_status: "in_warranty",
+        warranty_claim_no: "CLM-9",
+      }),
+    );
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect(parsed.data.brandId).toBe(3);
+      expect(parsed.data.serviceTypeId).toBe(1);
+      expect(parsed.data.itemCategory).toBe("Scooter");
+      expect(parsed.data.model).toBe("XGT");
+      expect(parsed.data.serialNo).toBe("KMK123456");
+      expect(parsed.data.warrantyStatus).toBe("in_warranty");
+      expect(parsed.data.warrantyClaimNo).toBe("CLM-9");
     }
   });
 });

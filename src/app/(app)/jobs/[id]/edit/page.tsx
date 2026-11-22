@@ -42,6 +42,14 @@ export default async function EditJobPage({
           id: jobId,
           clientId: detail.job.clientId ?? 0,
           mechanicId: detail.job.mechanic_id ?? null,
+          brandId: detail.job.brand_id ?? options.defaultBrandId,
+          serviceTypeId:
+            detail.job.service_type_id ?? options.defaultServiceTypeId,
+          itemCategory: detail.job.item_category ?? "",
+          model: detail.job.model ?? "",
+          serialNo: detail.job.serial_no ?? "",
+          warrantyStatus: detail.job.warranty_status ?? "",
+          warrantyClaimNo: detail.job.warranty_claim_no ?? "",
           item: detail.job.item,
           fault: detail.job.fault,
           remark: detail.job.remark,
@@ -73,6 +81,11 @@ export default async function EditJobPage({
           })),
           services: options.services,
           products: options.products,
+          brands: options.brands,
+          serviceTypes: options.serviceTypes,
+          mode: options.mode,
+          defaultServiceTypeId: options.defaultServiceTypeId,
+          defaultBrandId: options.defaultBrandId,
         }}
       />
     </div>

@@ -38,6 +38,7 @@ export const WRITABLE_SETTING_FIELDS = [
   "geofence_lat",
   "geofence_lng",
   "geofence_radius_m",
+  "service_center_mode",
 ] as const;
 
 const writable = new Set<string>(WRITABLE_SETTING_FIELDS);

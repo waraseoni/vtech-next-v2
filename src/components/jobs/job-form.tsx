@@ -18,18 +18,43 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { MAX_CLIENT_PHOTO_BYTES, compressPhoto } from "@/lib/images";
+import {
+  composeJobItemLabel,
+  wouldShrinkLegacyItem,
+} from "@/lib/job-item-label";
 import { formatINR, lineTotal, roundMoney } from "@/lib/money";
 
 export type JobFormOption = { id: number; name: string; contact?: string };
 export type JobFormService = { id: number; name: string; price: number };
 export type JobFormProduct = { id: number; name: string; price: number };
+export type JobFormBrand = {
+  id: number;
+  name: string;
+  code: string | null;
+  is_authorized: boolean;
+  is_active: boolean;
+};
+export type JobFormServiceType = {
+  id: number;
+  name: string;
+  is_active?: boolean;
+};
+export type ServiceCenterMode = "autonomous" | "single_brand" | "multi_brand";
 
 export type JobFormValues = {
   id?: number;
   clientId: number;
   mechanicId: number | null;
+  brandId?: number | null;
+  serviceTypeId?: number | null;
+  itemCategory?: string | null;
+  model?: string | null;
+  serialNo?: string | null;
+  warrantyStatus?: string | null;
+  warrantyClaimNo?: string | null;
   item: string;
   fault: string;
   remark: string;
@@ -69,6 +94,11 @@ export function JobForm({
     mechanics: JobFormOption[];
     services: JobFormService[];
     products: JobFormProduct[];
+    brands: JobFormBrand[];
+    serviceTypes: JobFormServiceType[];
+    mode: ServiceCenterMode;
+    defaultServiceTypeId: number | null;
+    defaultBrandId: number | null;
   };
   initial?: JobFormValues;
   nextJobId?: number;
@@ -101,6 +131,25 @@ export function JobForm({
   >([]);
   const [imageError, setImageError] = useState<string | null>(null);
   const previewUrls = useRef<string[]>([]);
+
+  // Service Center P2 — structured device fields. Legacy free text stays
+  // untouched until at least one structured field is filled (plan §2.5).
+  const [brandId, setBrandId] = useState(
+    String(initial?.brandId ?? options.defaultBrandId ?? ""),
+  );
+  const [itemCategory, setItemCategory] = useState(initial?.itemCategory ?? "");
+  const [model, setModel] = useState(initial?.model ?? "");
+  const [freeItem, setFreeItem] = useState(initial?.item ?? "");
+  const brandName =
+    options.brands.find((brand) => String(brand.id) === brandId)?.name ?? "";
+  const hasDevice = Boolean(brandName || itemCategory.trim() || model.trim());
+  const composedItem = composeJobItemLabel(
+    { brand: brandName, category: itemCategory, model },
+    freeItem,
+  );
+  const itemValue = hasDevice ? composedItem : freeItem;
+  const shrinkWarning =
+    hasDevice && wouldShrinkLegacyItem(composedItem, freeItem);
 
   useEffect(
     () => () => {
@@ -247,15 +296,29 @@ export function JobForm({
             />
           </div>
           <div className="grid gap-2">
-            <Label htmlFor="item">Item *</Label>
+            <Label htmlFor="item">Item / device label *</Label>
             <Input
               id="item"
               name="item"
               required
               maxLength={200}
-              defaultValue={initial?.item ?? ""}
+              value={itemValue}
+              readOnly={hasDevice}
+              onChange={(event) => setFreeItem(event.target.value)}
               placeholder="e.g. Samsung 1.5T AC"
             />
+            {hasDevice ? (
+              <p className="text-muted-foreground text-xs">
+                Brand + category + model se auto-compose hua. Free text badalne
+                ke liye neeche device fields khaali karein.
+              </p>
+            ) : null}
+            {shrinkWarning ? (
+              <p className="text-warning text-xs" role="status">
+                ⚠️ Purana item text chhota ho jayega — missing details model /
+                category field me daal dein.
+              </p>
+            ) : null}
           </div>
           <div className="grid gap-2">
             <Label htmlFor="commission_amount">Mechanic commission (₹)</Label>
@@ -291,6 +354,160 @@ export function JobForm({
               placeholder="Internal note (optional)"
             />
           </div>
+        </CardContent>
+      </Card>
+
+      <Card className="gap-5 py-5">
+        <CardHeader className="px-5">
+          <CardTitle>Device &amp; service details</CardTitle>
+          <CardDescription>
+            Serial warranty/claim ke liye zaroori hai. Item label upar auto
+            compose hota hai — legacy free text tab tak safe hai jab tak koi
+            structured field bhara na jaaye.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-4 px-5 sm:grid-cols-2">
+          <div className="grid gap-2">
+            <Label htmlFor="service_type_id">Service type *</Label>
+            <SearchableSelect
+              id="service_type_id"
+              name="service_type_id"
+              required
+              defaultValue={String(
+                initial?.serviceTypeId ?? options.defaultServiceTypeId ?? "",
+              )}
+              placeholder="Service type chuniye…"
+              options={options.serviceTypes
+                .filter(
+                  (type) => type.is_active === undefined || type.is_active,
+                )
+                .map((type) => ({
+                  value: String(type.id),
+                  label: type.name,
+                }))}
+            />
+          </div>
+
+          {options.mode === "single_brand" ? (
+            <div className="grid gap-2">
+              <Label htmlFor="brand_id">Brand (auto)</Label>
+              <input type="hidden" name="brand_id" value={brandId} />
+              <Input id="brand_id" value={brandName || "—"} readOnly />
+              <p className="text-muted-foreground text-xs">
+                Authorized brand auto-fill. Badalne ke liye{" "}
+                <Link href="/settings?tab=service-center" className="underline">
+                  Service Center settings
+                </Link>
+                .
+              </p>
+            </div>
+          ) : (
+            <div className="grid gap-2">
+              <Label htmlFor="brand_id">
+                Brand {options.mode === "multi_brand" ? "*" : "(optional)"}
+              </Label>
+              <SearchableSelect
+                id="brand_id"
+                name="brand_id"
+                required={options.mode === "multi_brand"}
+                value={brandId}
+                onChange={setBrandId}
+                placeholder={
+                  options.mode === "multi_brand"
+                    ? "Brand chuniye…"
+                    : "General / unknown"
+                }
+                options={[
+                  { value: "", label: "General / Unbranded" },
+                  ...options.brands
+                    .filter((brand) => brand.is_active)
+                    .map((brand) => ({
+                      value: String(brand.id),
+                      label: `${brand.name}${brand.is_authorized ? " (authorized)" : ""}`,
+                      hint: brand.code ?? undefined,
+                    })),
+                ]}
+              />
+            </div>
+          )}
+
+          <div className="grid gap-2">
+            <Label htmlFor="item_category">Item category</Label>
+            <Input
+              id="item_category"
+              name="item_category"
+              list="job-item-categories"
+              maxLength={80}
+              value={itemCategory}
+              onChange={(event) => setItemCategory(event.target.value)}
+              placeholder="e.g. Scooter / AC / SMPS"
+            />
+            <datalist id="job-item-categories">
+              {[
+                "Scooter",
+                "Bike",
+                "AC",
+                "Fridge",
+                "Washing Machine",
+                "TV",
+                "SMPS",
+                "Mobile",
+                "Laptop",
+              ].map((value) => (
+                <option key={value} value={value} />
+              ))}
+            </datalist>
+          </div>
+
+          <div className="grid gap-2">
+            <Label htmlFor="model">Model</Label>
+            <Input
+              id="model"
+              name="model"
+              maxLength={120}
+              value={model}
+              onChange={(event) => setModel(event.target.value)}
+              placeholder="e.g. XGT / 15 Pro"
+            />
+          </div>
+
+          <div className="grid gap-2">
+            <Label htmlFor="serial_no">Serial / IMEI / vehicle no</Label>
+            <Input
+              id="serial_no"
+              name="serial_no"
+              maxLength={120}
+              defaultValue={initial?.serialNo ?? ""}
+              placeholder="Warranty claim ke liye zaroori"
+            />
+          </div>
+
+          <div className="grid gap-2">
+            <Label htmlFor="warranty_status">Warranty status</Label>
+            <Select
+              id="warranty_status"
+              name="warranty_status"
+              defaultValue={initial?.warrantyStatus ?? ""}
+            >
+              <option value="">Unknown</option>
+              <option value="in_warranty">In warranty</option>
+              <option value="out_of_warranty">Out of warranty</option>
+              <option value="brand_paid">Brand paid</option>
+            </Select>
+          </div>
+
+          {options.mode !== "autonomous" ? (
+            <div className="grid gap-2">
+              <Label htmlFor="warranty_claim_no">Claim no</Label>
+              <Input
+                id="warranty_claim_no"
+                name="warranty_claim_no"
+                maxLength={80}
+                defaultValue={initial?.warrantyClaimNo ?? ""}
+                placeholder="Brand claim reference (P5 me register)"
+              />
+            </div>
+          ) : null}
         </CardContent>
       </Card>
 

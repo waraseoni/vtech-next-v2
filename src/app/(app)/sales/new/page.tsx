@@ -7,11 +7,17 @@ import { getNextSaleCode, getSaleFormOptions } from "@/lib/data/sales";
 
 export const metadata = { title: "New sale" };
 
-export default async function NewSalePage() {
+export default async function NewSalePage({
+  searchParams,
+}: PageProps<"/sales/new">) {
+  const params = await searchParams;
   const [options, nextCode] = await Promise.all([
     getSaleFormOptions(),
     getNextSaleCode(),
   ]);
+
+  const preferred = Number(params.client_id);
+  const client = options.clients.find((row) => row.id === preferred);
 
   return (
     <div className="mx-auto max-w-4xl space-y-5">
@@ -29,7 +35,20 @@ export default async function NewSalePage() {
         </p>
       </div>
 
-      <SaleForm options={options} />
+      <SaleForm
+        options={options}
+        initial={
+          client
+            ? {
+                clientId: client.id,
+                mechanicId: null,
+                paymentMode: "Cash",
+                remarks: "",
+                items: [{ productId: -1, qty: 1, price: 0 }],
+              }
+            : undefined
+        }
+      />
     </div>
   );
 }

@@ -187,7 +187,7 @@ export function AppShell({ children, brand, user }: AppShellProps) {
               <Input
                 name="q"
                 maxLength={60}
-                placeholder="Search clients, jobs, sales…"
+                placeholder="Clients, jobs, serial, sales…"
                 aria-label="Universal search"
                 className="pl-9"
               />

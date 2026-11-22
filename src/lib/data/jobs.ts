@@ -2,6 +2,7 @@ import "server-only";
 
 import { assertOk, unwrap, unwrapMaybe } from "@/lib/data/errors";
 import { getClientNames } from "@/lib/data/clients";
+import { getServiceCenterConfig } from "@/lib/data/service-center";
 import { removeMediaImages, uploadMediaImage } from "@/lib/data/storage";
 import { istDayRange, todayIST } from "@/lib/date";
 import {
@@ -10,6 +11,7 @@ import {
   nextJobCodeSequence,
 } from "@/lib/domain/codes";
 import { parseLegacyClientId } from "@/lib/domain/client";
+import { composeJobItemLabel } from "@/lib/job-item-label";
 import { lineTotal, roundMoney } from "@/lib/money";
 import { createClient } from "@/lib/supabase/server";
 
@@ -17,6 +19,10 @@ export type JobFilters = {
   search?: string;
   status?: number;
   mechanicId?: number;
+  brandId?: number;
+  serviceTypeId?: number;
+  /** "Untagged (legacy)" bucket — brand_id IS NULL. Default false = All. */
+  untaggedOnly?: boolean;
   from?: string;
   to?: string;
   page?: number;
@@ -30,6 +36,15 @@ export type JobListItem = {
   clientId: number | null;
   clientName: string;
   item: string;
+  brandId: number | null;
+  brandName: string | null;
+  itemCategory: string | null;
+  model: string | null;
+  serialNo: string | null;
+  serviceTypeId: number | null;
+  serviceTypeName: string | null;
+  warrantyStatus: string | null;
+  warrantyClaimNo: string | null;
   fault: string;
   amount: number;
   status: number;
@@ -44,6 +59,8 @@ export type JobsPage = {
   total: number;
   page: number;
   pageSize: number;
+  /** Global brand-tagging coverage — keeps old/new reports meaningful (plan §12.2). */
+  coverage: { tagged: number; untagged: number; total: number };
 };
 
 export type JobServiceLine = { serviceId: number; name: string; price: number };
@@ -54,7 +71,17 @@ export type JobProductLine = {
   price: number;
 };
 
-export type CreateJobInput = {
+export type JobDeviceFields = {
+  brandId?: number | null;
+  itemCategory?: string | null;
+  model?: string | null;
+  serialNo?: string | null;
+  serviceTypeId?: number | null;
+  warrantyStatus?: string | null;
+  warrantyClaimNo?: string | null;
+};
+
+export type CreateJobInput = JobDeviceFields & {
   userId: number;
   clientId: number;
   mechanicId: number | null;
@@ -72,7 +99,7 @@ export type CreateJobInput = {
 export type UpdateJobInput = Omit<CreateJobInput, "userId">;
 
 const JOB_COLUMNS =
-  "id, job_id, code, client_name, item, fault, remark, uniq_id, amount, mechanic_amount, mechanic_commission_amount, status, mechanic_id, date_created, date_updated, date_completed, location_id";
+  "id, job_id, code, client_name, item, fault, remark, uniq_id, amount, mechanic_amount, mechanic_commission_amount, status, mechanic_id, date_created, date_updated, date_completed, location_id, brand_id, item_category, model, serial_no, service_type_id, warranty_status, warranty_until, warranty_claim_no, warranty_claim_status";
 
 function safeSearchTerm(value: string | undefined): string {
   return (value ?? "")
@@ -113,6 +140,14 @@ export async function getJobsPage(filters: JobFilters = {}): Promise<JobsPage> {
   if (typeof filters.mechanicId === "number") {
     query = query.eq("mechanic_id", filters.mechanicId);
   }
+  if (filters.untaggedOnly) {
+    query = query.is("brand_id", null);
+  } else if (typeof filters.brandId === "number") {
+    query = query.eq("brand_id", filters.brandId);
+  }
+  if (typeof filters.serviceTypeId === "number") {
+    query = query.eq("service_type_id", filters.serviceTypeId);
+  }
   if (filters.from) {
     query = query.gte("date_created", istDayRange(filters.from).start);
   }
@@ -125,6 +160,8 @@ export async function getJobsPage(filters: JobFilters = {}): Promise<JobsPage> {
       `code.ilike.%${term}%`,
       `item.ilike.%${term}%`,
       `fault.ilike.%${term}%`,
+      `serial_no.ilike.%${term}%`,
+      `model.ilike.%${term}%`,
     ];
     if (clientMatches.length) {
       parts.push(
@@ -138,7 +175,14 @@ export async function getJobsPage(filters: JobFilters = {}): Promise<JobsPage> {
   const result = await query.range(start, start + pageSize - 1);
   const rows = unwrap(result, "jobs.list");
 
-  const [clientNames, mechanicNames] = await Promise.all([
+  const [
+    clientNames,
+    mechanicNames,
+    brandNames,
+    serviceTypeNames,
+    taggedRes,
+    untaggedRes,
+  ] = await Promise.all([
     getClientNames(
       rows
         .map((row) => parseLegacyClientId(row.client_name))
@@ -149,7 +193,29 @@ export async function getJobsPage(filters: JobFilters = {}): Promise<JobsPage> {
         .map((row) => row.mechanic_id)
         .filter((id): id is number => id !== null),
     ),
+    getBrandNames(
+      rows.map((row) => row.brand_id).filter((id): id is number => id !== null),
+    ),
+    getServiceTypeNames(
+      rows
+        .map((row) => row.service_type_id)
+        .filter((id): id is number => id !== null),
+    ),
+    supabase
+      .from("transaction_list")
+      .select("id", { count: "exact", head: true })
+      .eq("del_status", 0)
+      .not("brand_id", "is", null),
+    supabase
+      .from("transaction_list")
+      .select("id", { count: "exact", head: true })
+      .eq("del_status", 0)
+      .is("brand_id", null),
   ]);
+  assertOk(taggedRes, "jobs.coverageTagged");
+  assertOk(untaggedRes, "jobs.coverageUntagged");
+  const tagged = taggedRes.count ?? 0;
+  const untagged = untaggedRes.count ?? 0;
 
   return {
     rows: rows.map((row) => {
@@ -163,6 +229,16 @@ export async function getJobsPage(filters: JobFilters = {}): Promise<JobsPage> {
           clientNames.get(clientId ?? -1) ??
           (clientId ? `Client #${clientId}` : "Walk-in"),
         item: row.item,
+        brandId: row.brand_id,
+        brandName: brandNames.get(row.brand_id ?? -1) ?? null,
+        itemCategory: row.item_category,
+        model: row.model,
+        serialNo: row.serial_no,
+        serviceTypeId: row.service_type_id,
+        serviceTypeName:
+          serviceTypeNames.get(row.service_type_id ?? -1) ?? null,
+        warrantyStatus: row.warranty_status,
+        warrantyClaimNo: row.warranty_claim_no,
         fault: row.fault,
         amount: row.amount,
         status: row.status,
@@ -175,6 +251,7 @@ export async function getJobsPage(filters: JobFilters = {}): Promise<JobsPage> {
     total: result.count ?? rows.length,
     page,
     pageSize,
+    coverage: { tagged, untagged, total: tagged + untagged },
   };
 }
 
@@ -207,17 +284,20 @@ export async function getJobDetail(id: number) {
   if (!job) return null;
 
   const clientId = parseLegacyClientId(job.client_name);
-  const [clientNames, mechanicNames, location] = await Promise.all([
-    getClientNames(clientId ? [clientId] : []),
-    getMechanicNames(job.mechanic_id ? [job.mechanic_id] : []),
-    job.location_id
-      ? supabase
-          .from("locations")
-          .select("id, label, zone, rack, bin, box")
-          .eq("id", job.location_id)
-          .maybeSingle()
-      : Promise.resolve({ data: null, error: null }),
-  ]);
+  const [clientNames, mechanicNames, brandNames, serviceTypeNames, location] =
+    await Promise.all([
+      getClientNames(clientId ? [clientId] : []),
+      getMechanicNames(job.mechanic_id ? [job.mechanic_id] : []),
+      getBrandNames(job.brand_id ? [job.brand_id] : []),
+      getServiceTypeNames(job.service_type_id ? [job.service_type_id] : []),
+      job.location_id
+        ? supabase
+            .from("locations")
+            .select("id, label, zone, rack, bin, box")
+            .eq("id", job.location_id)
+            .maybeSingle()
+        : Promise.resolve({ data: null, error: null }),
+    ]);
 
   return {
     job: {
@@ -227,6 +307,8 @@ export async function getJobDetail(id: number) {
         clientNames.get(clientId ?? -1) ??
         (clientId ? `Client #${clientId}` : "Walk-in"),
       mechanicName: mechanicNames.get(job.mechanic_id ?? -1) ?? "—",
+      brandName: brandNames.get(job.brand_id ?? -1) ?? null,
+      serviceTypeName: serviceTypeNames.get(job.service_type_id ?? -1) ?? null,
     },
     services: unwrap(servicesRes, "jobs.services"),
     products: unwrap(productsRes, "jobs.products"),
@@ -248,6 +330,15 @@ export async function createJob(input: CreateJobInput) {
   const code = await claimUniqueJobCode(today, codes, jobId);
 
   const totals = jobTotals(input);
+  const brandLabel = await getBrandLabel(input.brandId);
+  const itemLabel = composeJobItemLabel(
+    {
+      brand: brandLabel,
+      category: input.itemCategory,
+      model: input.model,
+    },
+    input.item,
+  );
   const header = unwrap(
     await supabase
       .from("transaction_list")
@@ -259,7 +350,14 @@ export async function createJob(input: CreateJobInput) {
         client_name: String(input.clientId),
         fault: input.fault,
         remark: input.remark,
-        item: input.item,
+        item: itemLabel,
+        brand_id: input.brandId ?? null,
+        item_category: input.itemCategory ?? null,
+        model: input.model ?? null,
+        serial_no: input.serialNo ?? null,
+        service_type_id: input.serviceTypeId ?? null,
+        warranty_status: input.warrantyStatus ?? null,
+        warranty_claim_no: input.warrantyClaimNo ?? null,
         uniq_id: input.spot?.trim() ?? "",
         amount: totals.total,
         mechanic_amount: input.commissionAmount ?? 0,
@@ -294,6 +392,15 @@ export async function createJob(input: CreateJobInput) {
 export async function updateJob(id: number, input: UpdateJobInput) {
   const supabase = await createClient();
   const totals = jobTotals(input);
+  const brandLabel = await getBrandLabel(input.brandId);
+  const itemLabel = composeJobItemLabel(
+    {
+      brand: brandLabel,
+      category: input.itemCategory,
+      model: input.model,
+    },
+    input.item,
+  );
 
   unwrap(
     await supabase
@@ -303,7 +410,14 @@ export async function updateJob(id: number, input: UpdateJobInput) {
         client_name: String(input.clientId),
         fault: input.fault,
         remark: input.remark,
-        item: input.item,
+        item: itemLabel,
+        brand_id: input.brandId ?? null,
+        item_category: input.itemCategory ?? null,
+        model: input.model ?? null,
+        serial_no: input.serialNo ?? null,
+        service_type_id: input.serviceTypeId ?? null,
+        warranty_status: input.warrantyStatus ?? null,
+        warranty_claim_no: input.warrantyClaimNo ?? null,
         uniq_id: input.spot?.trim() ?? "",
         amount: totals.total,
         mechanic_amount: input.commissionAmount ?? 0,
@@ -454,7 +568,7 @@ export async function getMechanicName(
 
 export async function getJobFormOptions() {
   const supabase = await createClient();
-  const [clientsRes, mechanicsRes, servicesRes, productsRes] =
+  const [clientsRes, mechanicsRes, servicesRes, productsRes, scConfig] =
     await Promise.all([
       supabase
         .from("client_list")
@@ -479,6 +593,7 @@ export async function getJobFormOptions() {
         .eq("delete_flag", 0)
         .eq("status", 1)
         .order("name"),
+      getServiceCenterConfig(),
     ]);
 
   return {
@@ -486,6 +601,11 @@ export async function getJobFormOptions() {
     mechanics: unwrap(mechanicsRes, "jobs.options.mechanics"),
     services: unwrap(servicesRes, "jobs.options.services"),
     products: unwrap(productsRes, "jobs.options.products"),
+    brands: scConfig.brands,
+    serviceTypes: scConfig.serviceTypes,
+    mode: scConfig.mode,
+    defaultServiceTypeId: scConfig.defaultServiceTypeId,
+    defaultBrandId: scConfig.defaultBrandId,
   };
 }
 
@@ -503,6 +623,45 @@ async function getMechanicNames(ids: number[]): Promise<Map<number, string>> {
   return new Map(
     rows.map((row) => [row.id, `${row.firstname} ${row.lastname}`.trim()]),
   );
+}
+
+async function getBrandNames(ids: number[]): Promise<Map<number, string>> {
+  const unique = [...new Set(ids)];
+  if (!unique.length) return new Map();
+  const supabase = await createClient();
+  const rows = unwrap(
+    await supabase.from("brands").select("id, name").in("id", unique),
+    "jobs.brandNames",
+  );
+  return new Map(rows.map((row) => [row.id, row.name]));
+}
+
+/** Single brand label used by the derived `item` label (non-destructive compose). */
+async function getBrandLabel(
+  id: number | null | undefined,
+): Promise<string | null> {
+  if (!id) return null;
+  const supabase = await createClient();
+  const result = await supabase
+    .from("brands")
+    .select("name")
+    .eq("id", id)
+    .maybeSingle();
+  assertOk(result, "jobs.brandLabel");
+  return result.data?.name ?? null;
+}
+
+async function getServiceTypeNames(
+  ids: number[],
+): Promise<Map<number, string>> {
+  const unique = [...new Set(ids)];
+  if (!unique.length) return new Map();
+  const supabase = await createClient();
+  const rows = unwrap(
+    await supabase.from("service_types").select("id, name").in("id", unique),
+    "jobs.serviceTypeNames",
+  );
+  return new Map(rows.map((row) => [row.id, row.name]));
 }
 
 async function getTodayJobCodes(dateStr: string): Promise<string[]> {

@@ -7,6 +7,7 @@ import { WebVitalsReporter } from "@/components/web-vitals-reporter";
 import "./globals.css";
 
 export const metadata: Metadata = {
+  applicationName: "V-Tech Admin",
   title: {
     default: "V-Tech Admin",
     template: "%s · V-Tech Admin",

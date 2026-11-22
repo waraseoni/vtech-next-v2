@@ -17,6 +17,7 @@ export type ClientListItem = ClientBalance & {
   id: number;
   name: string;
   contact: string;
+  email: string;
   address: string;
   openingBalance: number;
   lastTxnDate: string | null;
@@ -29,11 +30,27 @@ export type ClientsPage = {
   pageSize: number;
   dueCount: number;
   dueTotal: number;
+  counts: {
+    all: number;
+    due: number;
+    high: number;
+    clear: number;
+    followup: number;
+  };
 };
+
+export type ClientTab = "all" | "due" | "high" | "clear" | "followup";
+export type ClientSort = "name" | "due" | "billed" | "paid" | "lastTxn";
 
 export type ClientFilters = {
   search?: string;
+  tab?: ClientTab;
+  /** @deprecated use `tab: "due"` */
   dueOnly?: boolean;
+  minBalance?: number;
+  maxBalance?: number;
+  sort?: ClientSort;
+  dir?: "asc" | "desc";
   page?: number;
   pageSize?: number;
 };
@@ -46,6 +63,22 @@ function safeSearchTerm(value: string | undefined): string {
     .trim()
     .replace(/[,()*%\\]/g, " ")
     .slice(0, 60);
+}
+
+function daysSinceDate(value: string | null, today: Date): number | null {
+  if (!value) return null;
+  const date = new Date(`${value.slice(0, 10)}T00:00:00+05:30`);
+  if (Number.isNaN(date.getTime())) return null;
+  return Math.floor((today.getTime() - date.getTime()) / 86_400_000);
+}
+
+function matchesTab(row: ClientListItem, tab: ClientTab, today: Date): boolean {
+  if (tab === "all") return true;
+  if (tab === "due") return row.due > 0;
+  if (tab === "high") return row.due > 20_000;
+  const days = daysSinceDate(row.lastTxnDate, today);
+  if (tab === "followup") return row.due <= 0 && days != null && days > 30;
+  return row.due <= 0 && (days == null || days <= 30);
 }
 
 /** One RPC for every client's money + one query for profile rows. */
@@ -62,10 +95,36 @@ export const getClientsFinancials = cache(async () => {
 export async function getClientsPage(
   filters: ClientFilters = {},
 ): Promise<ClientsPage> {
-  const supabase = await createClient();
+  const { directory, counts, dueRows } = await getClientDirectory(filters);
   const page = Math.max(1, filters.page ?? 1);
-  const pageSize = Math.min(100, Math.max(10, filters.pageSize ?? 50));
+  const pageSize = Math.min(100, Math.max(10, filters.pageSize ?? 25));
+  const lastPage = Math.max(1, Math.ceil(directory.length / pageSize));
+  const safePage = Math.min(page, lastPage);
+  const start = (safePage - 1) * pageSize;
+
+  return {
+    rows: directory.slice(start, start + pageSize),
+    total: directory.length,
+    page: safePage,
+    pageSize,
+    dueCount: dueRows.length,
+    dueTotal: sumMoney(dueRows.map((row) => row.due)),
+    counts,
+  };
+}
+
+/** Full filtered directory (no paging) for CSV export. */
+export async function getClientsExport(
+  filters: ClientFilters = {},
+): Promise<ClientListItem[]> {
+  const { directory } = await getClientDirectory(filters);
+  return directory;
+}
+
+async function getClientDirectory(filters: ClientFilters) {
+  const supabase = await createClient();
   const term = safeSearchTerm(filters.search);
+  const tab: ClientTab = filters.dueOnly ? "due" : (filters.tab ?? "all");
 
   let query = supabase
     .from("client_list")
@@ -76,7 +135,7 @@ export async function getClientsPage(
 
   if (term) {
     query = query.or(
-      `firstname.ilike.%${term}%,lastname.ilike.%${term}%,contact.ilike.%${term}%,address.ilike.%${term}%`,
+      `firstname.ilike.%${term}%,lastname.ilike.%${term}%,contact.ilike.%${term}%,email.ilike.%${term}%,address.ilike.%${term}%`,
     );
   }
 
@@ -100,6 +159,7 @@ export async function getClientsPage(
       id: row.id,
       name: clientDisplayName(row),
       contact: row.contact,
+      email: row.email ?? "",
       address: row.address,
       openingBalance: row.opening_balance ?? 0,
       lastTxnDate: finance?.last_txn_date ?? null,
@@ -107,21 +167,40 @@ export async function getClientsPage(
     };
   });
 
-  const filtered = filters.dueOnly
-    ? merged.filter((row) => row.due > 0)
-    : merged;
-  const lastPage = Math.max(1, Math.ceil(filtered.length / pageSize));
-  const safePage = Math.min(page, lastPage);
-  const start = (safePage - 1) * pageSize;
-  const dueRows = merged.filter((row) => row.due > 0);
+  const min = Number.isFinite(filters.minBalance) ? filters.minBalance : null;
+  const max = Number.isFinite(filters.maxBalance) ? filters.maxBalance : null;
+  const ranged = merged.filter(
+    (row) => (min == null || row.due >= min) && (max == null || row.due <= max),
+  );
+
+  const today = new Date();
+  const counts = {
+    all: ranged.length,
+    due: ranged.filter((row) => row.due > 0).length,
+    high: ranged.filter((row) => row.due > 20_000).length,
+    clear: ranged.filter((row) => matchesTab(row, "clear", today)).length,
+    followup: ranged.filter((row) => matchesTab(row, "followup", today)).length,
+  };
+
+  const directory = ranged.filter((row) => matchesTab(row, tab, today));
+  const sort = filters.sort ?? "name";
+  const direction = filters.dir === "desc" ? -1 : 1;
+  directory.sort((a, b) => {
+    if (sort === "due") return (a.due - b.due) * direction;
+    if (sort === "billed") return (a.billed - b.billed) * direction;
+    if (sort === "paid") return (a.paid - b.paid) * direction;
+    if (sort === "lastTxn") {
+      return (
+        (a.lastTxnDate ?? "").localeCompare(b.lastTxnDate ?? "") * direction
+      );
+    }
+    return a.name.localeCompare(b.name) * direction;
+  });
 
   return {
-    rows: filtered.slice(start, start + pageSize),
-    total: filtered.length,
-    page: safePage,
-    pageSize,
-    dueCount: dueRows.length,
-    dueTotal: sumMoney(dueRows.map((row) => row.due)),
+    directory,
+    counts,
+    dueRows: merged.filter((row) => row.due > 0),
   };
 }
 
@@ -141,6 +220,39 @@ export async function getClientNames(
   return new Map(rows.map((row) => [row.id, clientDisplayName(row)]));
 }
 
+export type ClientSummary = { id: number; name: string; contact: string };
+
+export async function getClientSummaries(
+  ids: number[],
+): Promise<ClientSummary[]> {
+  const unique = [
+    ...new Set(ids.filter((id) => Number.isSafeInteger(id))),
+  ].slice(0, 200);
+  if (!unique.length) return [];
+
+  const supabase = await createClient();
+  const result = await supabase
+    .from("client_list")
+    .select("id, firstname, middlename, lastname, contact")
+    .in("id", unique)
+    .eq("delete_flag", 0);
+
+  const rows = unwrap(result, "clients.summaries");
+  const byId = new Map(
+    rows.map((row) => [
+      row.id,
+      {
+        id: row.id,
+        name: clientDisplayName(row),
+        contact: row.contact,
+      } satisfies ClientSummary,
+    ]),
+  );
+  return unique
+    .map((id) => byId.get(id))
+    .filter((row): row is ClientSummary => row != null);
+}
+
 export async function getClientDetail(id: number) {
   const supabase = await createClient();
 
@@ -157,6 +269,7 @@ export async function getClientDetail(id: number) {
       .from("client_list")
       .select(CLIENT_COLUMNS)
       .eq("id", id)
+      .eq("delete_flag", 0)
       .maybeSingle(),
     supabase
       .from("client_contacts")
@@ -166,12 +279,12 @@ export async function getClientDetail(id: number) {
     supabase
       .from("client_payments")
       .select(
-        "id, job_id, bill_no, payment_date, amount, discount, net_amount, payment_mode, payment_type, remarks",
+        "id, job_id, loan_id, bill_no, payment_date, amount, discount, net_amount, payment_mode, payment_type, remarks",
       )
       .eq("client_id", id)
       .order("payment_date", { ascending: false })
       .order("id", { ascending: false })
-      .limit(25),
+      .limit(200),
     supabase
       .from("transaction_list")
       .select(
@@ -180,7 +293,7 @@ export async function getClientDetail(id: number) {
       .eq("client_name", String(id))
       .eq("del_status", 0)
       .order("date_created", { ascending: false })
-      .limit(25),
+      .limit(100),
     supabase
       .from("direct_sales")
       .select(
@@ -188,7 +301,7 @@ export async function getClientDetail(id: number) {
       )
       .eq("client_id", id)
       .order("date_created", { ascending: false })
-      .limit(25),
+      .limit(100),
     supabase
       .from("client_loans")
       .select(

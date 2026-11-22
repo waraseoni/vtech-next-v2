@@ -42,9 +42,33 @@ export const jobProductLineSchema = z.object({
   price: money,
 });
 
+const optionalText = (max: number) =>
+  z
+    .string()
+    .trim()
+    .max(max, `Ye field ${max} characters se chhota hona chahiye.`)
+    .optional();
+
 export const jobInputSchema = z.object({
   clientId: z.coerce.number().int().positive("Client chunna zaroori hai."),
   mechanicId: optionalId,
+  // Service Center P2 — device + service type fields (all additive).
+  brandId: optionalId,
+  serviceTypeId: z.coerce
+    .number()
+    .int()
+    .positive("Service type chunna zaroori hai."),
+  itemCategory: optionalText(80),
+  model: optionalText(120),
+  serialNo: optionalText(120),
+  warrantyStatus: z
+    .union([
+      z.literal(""),
+      z.enum(["in_warranty", "out_of_warranty", "brand_paid"]),
+    ])
+    .optional()
+    .transform((value) => value || undefined),
+  warrantyClaimNo: optionalText(80),
   item: z
     .string()
     .trim()
@@ -78,6 +102,13 @@ export function jobInputFromForm(formData: FormData) {
   return jobInputSchema.safeParse({
     clientId: formData.get("client_id") ?? "",
     mechanicId: formData.get("mechanic_id") ?? "",
+    brandId: formData.get("brand_id") ?? "",
+    serviceTypeId: formData.get("service_type_id") ?? "",
+    itemCategory: formData.get("item_category") ?? "",
+    model: formData.get("model") ?? "",
+    serialNo: formData.get("serial_no") ?? "",
+    warrantyStatus: formData.get("warranty_status") ?? "",
+    warrantyClaimNo: formData.get("warranty_claim_no") ?? "",
     item: formData.get("item") ?? "",
     fault: formData.get("fault") ?? "",
     remark: formData.get("remark") ?? "",

@@ -4582,4 +4582,945 @@ begin
   end if;
 end $$;
 
+-- ══════════════════════════════════════════════════════════════════════════════
+-- get_due_stats() (20261113_dashboard_due_stats_rpc.sql)
+-- Dashboard "Due Reminders" widget — 5 full-table scans → 1 aggregate.
+-- Formula docs: src/lib/client-due.ts. Purana data purane rules se (client_name
+-- text → bigint, PHP convention). Read-only, stable, security definer.
+-- ══════════════════════════════════════════════════════════════════════════════
+create or replace function public.get_due_stats()
+returns jsonb
+language sql
+security definer
+stable
+set search_path = public
+as $$
+  with active_loans as (
+    select id, client_id, total_payable
+    from public.client_loans
+    where status = 1
+  ),
+  repair_agg as (
+    select client_name::bigint as client_id,
+           coalesce(sum(amount), 0) as repair_billed
+    from public.transaction_list
+    where status = 5 and client_name ~ '^\d+$'
+    group by 1
+  ),
+  direct_agg as (
+    select client_id,
+           coalesce(sum(total_amount), 0) as direct_sales_billed
+    from public.direct_sales
+    group by client_id
+  ),
+  service_pay_agg as (
+    select client_id,
+           coalesce(sum(amount + coalesce(discount, 0)), 0) as service_paid
+    from public.client_payments
+    where loan_id is null or loan_id = 0
+    group by client_id
+  ),
+  loan_given_agg as (
+    select client_id,
+           coalesce(sum(total_payable), 0) as active_loan_given
+    from active_loans
+    group by client_id
+  ),
+  loan_repaid_agg as (
+    select cp.client_id,
+           coalesce(sum(cp.amount + coalesce(cp.discount, 0)), 0) as loan_repaid
+    from public.client_payments cp
+    inner join active_loans al on al.id = cp.loan_id
+    group by cp.client_id
+  ),
+  balances as (
+    select
+      c.id,
+      c.payment_due_date,
+      coalesce(c.opening_balance, 0)
+        + coalesce(r.repair_billed, 0)
+        + coalesce(d.direct_sales_billed, 0)
+        - coalesce(sp.service_paid, 0)
+        + coalesce(lg.active_loan_given, 0)
+        - coalesce(lr.loan_repaid, 0) as balance
+    from public.client_list c
+    left join repair_agg      r  on r.client_id  = c.id
+    left join direct_agg      d  on d.client_id  = c.id
+    left join service_pay_agg sp on sp.client_id = c.id
+    left join loan_given_agg  lg on lg.client_id = c.id
+    left join loan_repaid_agg lr on lr.client_id = c.id
+    where c.delete_flag = 0
+  ),
+  dues as (
+    select
+      balance,
+      case
+        when payment_due_date is null then null
+        else payment_due_date - (now() at time zone 'Asia/Kolkata')::date
+      end as days_diff
+    from balances
+    where balance > 0.01
+  )
+  select jsonb_build_object(
+    'overdue',  count(*) filter (where days_diff < 0),
+    'today',    count(*) filter (where days_diff = 0),
+    'upcoming', count(*) filter (where days_diff between 1 and 7),
+    'amount',   coalesce(sum(balance), 0)
+  )
+  from dues;
+$$;
+
+revoke all on function public.get_due_stats() from public;
+revoke all on function public.get_due_stats() from anon;
+grant execute on function public.get_due_stats() to authenticated;
+grant execute on function public.get_due_stats() to service_role;
+
+-- ══════════════════════════════════════════════════════════════════════════════
+-- get_jobs_stats() + get_stale_jobs() (20261113_jobs_stats_stale_rpc.sql)
+-- /jobs Quick Stats ka full-dataset scan → 1 aggregate; stale alert ke 3
+-- requests → 1 RPC. Filters/dual-era rules: src/app/jobs/jobListQueries.ts.
+-- Read-only, stable, security definer. Koi data change nahi.
+-- ══════════════════════════════════════════════════════════════════════════════
+create or replace function public.get_jobs_stats(
+  p_term text default null,
+  p_date_from text default null,
+  p_date_to text default null,
+  p_hide_delivered boolean default false,
+  p_status int default null,
+  p_spot text default null
+)
+returns jsonb
+language sql
+security definer
+stable
+set search_path = public
+as $$
+  with args as (
+    select
+      case when coalesce(p_term, '') = '' then null
+           else '%' || lower(p_term) || '%' end as pat,
+      case when coalesce(p_date_from, '') = '' then null
+           else (p_date_from::timestamptz at time zone 'UTC') end as from_ts,
+      case when coalesce(p_date_to, '') = '' then null
+           else ((p_date_to || 'T23:59:59+05:30')::timestamptz at time zone 'UTC') end as to_ts,
+      coalesce(p_hide_delivered, false) as hide_delivered,
+      p_status as filt_status,
+      case when coalesce(p_spot, '') ~ '^\d+$' then p_spot::int else null end as spot_id
+  ),
+  filtered as (
+    select t.status, coalesce(t.amount, 0) as amount
+    from public.transaction_list t
+    cross join args a
+    where t.del_status = 0
+      and (a.from_ts is null or t.date_created >= a.from_ts)
+      and (a.to_ts is null or t.date_created <= a.to_ts)
+      and (not a.hide_delivered or t.status <> 5)
+      and (a.filt_status is null or t.status = a.filt_status)
+      and (a.spot_id is null or t.location_id = a.spot_id)
+      and (
+        a.pat is null
+        or t.job_id ilike a.pat
+        or t.code ilike a.pat
+        or t.item ilike a.pat
+        or t.fault ilike a.pat
+        or t.uniq_id ilike a.pat
+        or t.remark ilike a.pat
+        or t.client_name in (
+          select c.id::text
+          from public.client_list c
+          where c.firstname ilike a.pat
+             or c.middlename ilike a.pat
+             or c.lastname ilike a.pat
+             or c.contact ilike a.pat
+        )
+      )
+  )
+  select jsonb_build_object(
+    'total',     count(*),
+    'pending',   count(*) filter (where status = 0),
+    'progress',  count(*) filter (where status = 1),
+    'completed', count(*) filter (where status in (2, 3, 5)),
+    'totalAmt',  coalesce(sum(amount), 0)
+  )
+  from filtered;
+$$;
+
+revoke all on function public.get_jobs_stats(text, text, text, boolean, int, text) from public;
+revoke all on function public.get_jobs_stats(text, text, text, boolean, int, text) from anon;
+grant execute on function public.get_jobs_stats(text, text, text, boolean, int, text)
+  to authenticated;
+grant execute on function public.get_jobs_stats(text, text, text, boolean, int, text)
+  to service_role;
+
+create or replace function public.get_stale_jobs(
+  p_days int default 7,
+  p_limit int default 50
+)
+returns jsonb
+language sql
+security definer
+stable
+set search_path = public
+as $$
+  with args as (
+    select
+      greatest(coalesce(p_days, 7), 0) as days,
+      greatest(coalesce(p_limit, 50), 0) as lim,
+      now() as now_ts,
+      (now() at time zone 'UTC') as now_utc
+  ),
+  cands as (
+    select t.id, t.job_id, t.item, t.uniq_id, t.date_created, t.date_updated
+    from public.transaction_list t
+    cross join args a
+    where t.del_status = 0
+      and t.status in (2, 3)
+      and t.uniq_id <> ''
+      and t.date_updated < a.now_utc - make_interval(days => a.days)
+    order by t.date_updated asc
+    limit 300
+  ),
+  logs as (
+    select l.meta_id, max(l.date_created) as last_at
+    from public.activity_logs l
+    where (
+        l.module = 'Transactions'
+        and l.action = 'Transaction Status Changed'
+        and l.meta_id in (select c.id::text from cands c)
+      )
+      or (
+        l.module = 'Jobs'
+        and l.action = 'Updated Job Status'
+        and l.meta_id in (select c.job_id from cands c)
+      )
+    group by l.meta_id
+  ),
+  scored as (
+    select
+      c.id,
+      c.job_id,
+      c.item,
+      coalesce(c.uniq_id, '') as uniq_id,
+      coalesce(la.last_at, lb.last_at, c.date_updated, c.date_created) as changed_at,
+      c.date_updated,
+      a.now_ts,
+      a.days
+    from cands c
+    cross join args a
+    left join logs la on la.meta_id = c.id::text
+    left join logs lb on lb.meta_id = c.job_id
+  ),
+  stale as (
+    select *
+    from scored s
+    where s.changed_at is not null
+      and s.changed_at <= (s.now_ts at time zone 'UTC') - make_interval(days => s.days)
+    order by s.changed_at asc, s.date_updated asc, s.id asc
+    limit (select lim from args)
+  )
+  select coalesce(
+    jsonb_agg(
+      jsonb_build_object(
+        'id', s.id,
+        'job_id', s.job_id,
+        'item', s.item,
+        'uniq_id', s.uniq_id,
+        'days', floor(extract(epoch from (s.now_ts - (s.changed_at at time zone 'UTC'))) / 86400)::int
+      )
+      order by s.changed_at asc
+    ),
+    '[]'::jsonb
+  )
+  from stale s;
+$$;
+
+revoke all on function public.get_stale_jobs(int, int) from public;
+revoke all on function public.get_stale_jobs(int, int) from anon;
+grant execute on function public.get_stale_jobs(int, int) to authenticated;
+grant execute on function public.get_stale_jobs(int, int) to service_role;
+
+-- ── 20261117_jobs_list_sort_index.sql ────────────────────────────────────────
+-- /jobs list page query: del_status = 0 order by job_id desc limit 25.
+-- job_id TEXT par poora btree index nahi tha → har load par 2.3k-row sort.
+-- Measured (RLS): ~106 ms → ~39 ms.
+create index if not exists transaction_list_del_status_job_id_idx
+  on public.transaction_list (del_status, job_id desc);
+
+-- ---- 20261119_dashboard_low_stock_rpc.sql -----------------------------------
+-- Dashboard "Low Stock" widget: 3 sequential PostgREST calls
+-- (product_list -> get_inventory_stock + product_locations) -> 1 definer RPC.
+-- Stock formula does NOT get duplicated: it calls get_inventory_stock().
+create or replace function public.get_dashboard_low_stock()
+returns table(
+  product_id     bigint,
+  name           text,
+  alert_quantity integer,
+  available      bigint,
+  place          text,
+  deficit        bigint
+)
+language sql
+security definer
+stable
+set search_path = public
+as $$
+  with lp as (
+    select p.id, p.name, p.alert_quantity
+    from public.product_list p
+    where p.delete_flag = 0
+      and p.alert_quantity > 0
+      and public.is_frontend_staff()
+  ),
+  st as (
+    select s.product_id, s.available
+    from public.get_inventory_stock(array(select l.id::bigint from lp l)) s
+  ),
+  loc as (
+    select distinct on (pl.product_id)
+           pl.product_id,
+           l.zone, l.rack, l.bin, l.box
+    from public.product_locations pl
+    inner join public.locations l on l.id = pl.location_id
+    where pl.product_id in (select l2.id from lp l2)
+    order by pl.product_id
+  )
+  select
+    lp.id::bigint                            as product_id,
+    lp.name                                  as name,
+    lp.alert_quantity                        as alert_quantity,
+    coalesce(st.available, 0)::bigint        as available,
+    case
+      when loc.product_id is null then null
+      else nullif(
+        concat_ws(' ▸ ', loc.zone, loc.rack, loc.bin, loc.box),
+        ''
+      )
+    end                                      as place,
+    (lp.alert_quantity::bigint - coalesce(st.available, 0)) as deficit
+  from lp
+  left join st  on st.product_id = lp.id::bigint
+  left join loc on loc.product_id = lp.id
+  where coalesce(st.available, 0) < lp.alert_quantity
+  order by (coalesce(st.available, 0) - lp.alert_quantity::bigint) asc, lp.id asc;
+$$;
+
+revoke all on function public.get_dashboard_low_stock() from public;
+revoke all on function public.get_dashboard_low_stock() from anon;
+grant execute on function public.get_dashboard_low_stock() to authenticated;
+grant execute on function public.get_dashboard_low_stock() to service_role;
+
+-- ---- 20261119_client_payments_recent_index.sql ------------------------------
+-- Dashboard "Recent Payments" / payments page default sort:
+-- order by payment_date desc, id desc limit 10. RLS (is_frontend_staff) per row
+-- ke saath Seq Scan + Sort ~23 ms DB time (HTTP ~141 ms) → Index Scan ~3 ms.
+create index if not exists client_payments_date_id_idx
+  on public.client_payments (payment_date desc, id desc);
+
+-- ---- 20261119_dashboard_widget_rpcs.sql ------------------------------------
+-- Dashboard recents (2 rounds -> 1) + waiting summary (2 -> 1), both
+-- read-only definer RPCs with the same is_frontend_staff() guard.
+create or replace function public.get_dashboard_recents()
+returns jsonb
+language sql
+security definer
+stable
+set search_path = public
+as $$
+  with rj as (
+    select t.id, t.job_id, t.client_name, t.item, t.amount, t.status,
+           nullif(regexp_replace(t.client_name, '\D', '', 'g'), '')::bigint as client_pk
+    from public.transaction_list t
+    where t.del_status = 0
+      and public.is_frontend_staff()
+    order by t.id desc
+    limit 5
+  ),
+  rp as (
+    select p.id, p.amount, p.payment_mode, p.payment_date, p.client_id
+    from public.client_payments p
+    where public.is_frontend_staff()
+    order by p.payment_date desc, p.id desc
+    limit 10
+  )
+  select jsonb_build_object(
+    'recentJobs', coalesce((
+      select jsonb_agg(
+        jsonb_build_object(
+          'id', rj.id,
+          'job_id', rj.job_id,
+          'client_name', coalesce(
+            nullif(btrim(concat_ws(' ', c.firstname, c.lastname)), ''),
+            'Walk-in'
+          ),
+          'item', rj.item,
+          'amount', rj.amount,
+          'status', rj.status
+        )
+        order by rj.id desc
+      )
+      from rj
+      left join public.client_list c on c.id = rj.client_pk
+    ), '[]'::jsonb),
+    'recentPayments', coalesce((
+      select jsonb_agg(
+        jsonb_build_object(
+          'id', rp.id,
+          'amount', rp.amount,
+          'payment_mode', coalesce(rp.payment_mode::text, 'Cash'),
+          'payment_date', rp.payment_date,
+          'client_name', coalesce(
+            nullif(btrim(concat_ws(' ', c2.firstname, c2.lastname)), ''),
+            'Unknown'
+          )
+        )
+        order by rp.payment_date desc, rp.id desc
+      )
+      from rp
+      left join public.client_list c2 on c2.id = rp.client_id
+    ), '[]'::jsonb)
+  );
+$$;
+
+create or replace function public.get_dashboard_waiting()
+returns jsonb
+language sql
+security definer
+stable
+set search_path = public
+as $$
+  with parts as (
+    select p.transaction_id, p.status, p.date_created
+    from public.job_required_parts p
+    where p.status in (0, 1, 2)
+      and public.is_frontend_staff()
+  ),
+  jobs as (
+    select t.id, t.job_id
+    from public.transaction_list t
+    where t.id in (select transaction_id from parts)
+      and t.status in (0, 1, 2, 3)
+      and t.del_status = 0
+  ),
+  active_parts as (
+    select p.transaction_id, p.status, p.date_created
+    from parts p
+    where p.transaction_id in (select id from jobs)
+  ),
+  agg as (
+    select
+      count(*)::int as waiting_parts,
+      count(*) filter (where ap.status = 1)::int as ordered_count,
+      count(*) filter (where ap.status <> 1)::int as waiting_count,
+      min(ap.date_created) as oldest_at,
+      (array_agg(ap.transaction_id order by ap.date_created asc, ap.transaction_id asc))[1]
+        as oldest_txn
+    from active_parts ap
+  )
+  select case
+    when (select waiting_parts from agg) = 0 then
+      jsonb_build_object(
+        'waitingJobs', 0,
+        'waitingParts', 0,
+        'orderedCount', 0,
+        'waitingCount', 0,
+        'oldestDays', 0,
+        'oldestJobId', null
+      )
+    else
+      jsonb_build_object(
+        'waitingJobs', (select count(*)::int from jobs),
+        'waitingParts', a.waiting_parts,
+        'orderedCount', a.ordered_count,
+        'waitingCount', a.waiting_count,
+        'oldestDays', greatest(
+          0,
+          floor(extract(epoch from (now() - a.oldest_at)) / 86400)::int
+        ),
+        'oldestJobId', coalesce(
+          (select nullif(j.job_id, '') from jobs j where j.id = a.oldest_txn),
+          '#' || a.oldest_txn::text
+        )
+      )
+  end
+  from agg a;
+$$;
+
+revoke all on function public.get_dashboard_recents() from public;
+revoke all on function public.get_dashboard_recents() from anon;
+grant execute on function public.get_dashboard_recents() to authenticated;
+grant execute on function public.get_dashboard_recents() to service_role;
+
+revoke all on function public.get_dashboard_waiting() from public;
+revoke all on function public.get_dashboard_waiting() from anon;
+grant execute on function public.get_dashboard_waiting() to authenticated;
+grant execute on function public.get_dashboard_waiting() to service_role;
+
 NOTIFY pgrst, 'reload schema';
+
+
+-- ============================================================================
+-- FOLD-IN: 20261116_rpc_grants_hardening.sql (RPC grants hardening, 22 Nov 2026)
+-- Ye block latest canonical schema ka hissa hai; alag migration file bhi maujood hai.
+-- ============================================================================
+
+-- ============================================================================
+-- 20261116_rpc_grants_hardening.sql
+-- RPC Grants Hardening â€” SECURITY DEBT FIX (data-safe, function-level only)
+--
+-- Source plan: docs/plans/rpc_grants_hardening_plan.md
+-- Created: 22 Nov 2026 (test DB apply)
+--
+-- Problem (live audit 16 Nov 2026):
+--   * 28 public functions me se 26 anon-executable the (frontend anon key public).
+--   * 8 staff-only SECURITY DEFINER RPCs me is_frontend_staff() guard nahi tha.
+--   * reset_sequence(text) -> arbitrary setval() = INSERT DoS (CRITICAL).
+--
+-- Is migration ke 3 layers:
+--   A) Grants: har staff-only / helper RPC se PUBLIC + anrevoke, authenticated +
+--      service_role ko EXECUTE. Trigger functions se PUBLIC/anon/authenticated revoke.
+--   B) Guard: 9 staff-only definer RPCs ka body bilkul same rakhte hue unhe
+--      _impl_* par rename karo aur public naam par thin is_frontend_staff() wrapper.
+--   C) Verify: neeche comment me SQL (grant matrix + role simulation).
+--
+-- Data/table/column kabhi touch nahi hota. Rollback: docs me diya gaya hai.
+-- Idempotent: DO blocks rename skip karte hain, wrappers CREATE OR REPLACE hain.
+-- ============================================================================
+
+-- ---------------------------------------------------------------------------
+-- Layer A1 â€” Grants: non-wrapped RPCs + already-hardened RPCs (uniform pattern)
+-- ---------------------------------------------------------------------------
+do $$
+declare
+  sig text;
+begin
+  foreach sig in array array[
+    -- read-only staff RPCs (already anon-denied; yahan PUBLIC bhi hatate hain)
+    'public.get_due_stats()',
+    'public.get_jobs_stats(text, text, text, boolean, integer, text)',
+    'public.get_stale_jobs(integer, integer)',
+    'public.get_dashboard_low_stock()',
+    'public.get_dashboard_recents()',
+    'public.get_dashboard_waiting()',
+
+    -- invoker / hygiene RPCs
+    'public.save_direct_sale(integer, text, integer, integer, text, text, integer, text, jsonb)',
+    'public.get_transactions_with_client_data(date, date)',
+
+    -- portal helpers: anon nahi, authenticated (client role) theek
+    'public.get_my_client_id()',
+    'public.get_my_role()',
+
+    -- RLS helper: policies authenticated role me chalte hain
+    'public.is_frontend_staff()',
+
+    -- guarded inventory writers: guard hai, par anon grant bhi nahi hona chahiye
+    'public.receive_po_receipt(bigint, jsonb)',
+    'public.receive_po_receipt(bigint, jsonb, numeric)',
+    'public.record_stocktake(integer, integer, text, text, text, text)'
+  ]::text[]
+  loop
+    execute format('revoke all on function %s from public', sig);
+    execute format('revoke all on function %s from anon', sig);
+    execute format('grant execute on function %s to authenticated', sig);
+    execute format('grant execute on function %s to service_role', sig);
+  end loop;
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- Layer A2 â€” Trigger functions: trigger execution grant par depend nahi karta.
+--              PUBLIC/anon/authenticated se direct call band.
+-- ---------------------------------------------------------------------------
+do $$
+declare
+  sig text;
+begin
+  foreach sig in array array[
+    'public.handle_new_user()',
+    'public.prevent_role_escalation()',
+    'public.update_date_updated()',
+    'public.touch_bom_templates()',
+    'public.touch_client_contacts()',
+    'public.touch_purchase_orders()',
+    'public.touch_push_subscriptions()',
+    'public.touch_supplier_contact_persons()',
+    'public.touch_user_passkeys()'
+  ]::text[]
+  loop
+    execute format('revoke all on function %s from public, anon, authenticated', sig);
+  end loop;
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- Layer B â€” Guard wrappers (9 staff-only definer RPCs)
+--   Pattern: original -> _impl_* (body same), public naam -> thin guard wrapper.
+--   Wrapper SECURITY DEFINER hai: _impl_* ko kisi role ko grant nahi chahiye.
+-- ---------------------------------------------------------------------------
+
+-- 1) get_dashboard_stats(text, text) -> jsonb
+do $$ begin
+  if not exists (
+    select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public' and p.proname = '_impl_get_dashboard_stats'
+  ) then
+    alter function public.get_dashboard_stats(text, text) rename to _impl_get_dashboard_stats;
+  end if;
+end $$;
+revoke all on function public._impl_get_dashboard_stats(text, text) from public, anon, authenticated, service_role;
+
+create or replace function public.get_dashboard_stats(p_today_start text, p_today_end text)
+returns jsonb language plpgsql security definer stable set search_path = public as $$
+begin
+  if not public.is_frontend_staff() then
+    raise exception 'permission denied for staff-only function' using errcode = '42501';
+  end if;
+  return public._impl_get_dashboard_stats(p_today_start, p_today_end);
+end $$;
+revoke all on function public.get_dashboard_stats(text, text) from public, anon;
+grant execute on function public.get_dashboard_stats(text, text) to authenticated, service_role;
+
+-- 2) get_clients_page_financials() -> jsonb
+do $$ begin
+  if not exists (
+    select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public' and p.proname = '_impl_get_clients_page_financials'
+  ) then
+    alter function public.get_clients_page_financials() rename to _impl_get_clients_page_financials;
+  end if;
+end $$;
+revoke all on function public._impl_get_clients_page_financials() from public, anon, authenticated, service_role;
+
+create or replace function public.get_clients_page_financials()
+returns jsonb language plpgsql security definer stable set search_path = public as $$
+begin
+  if not public.is_frontend_staff() then
+    raise exception 'permission denied for staff-only function' using errcode = '42501';
+  end if;
+  return public._impl_get_clients_page_financials();
+end $$;
+revoke all on function public.get_clients_page_financials() from public, anon;
+grant execute on function public.get_clients_page_financials() to authenticated, service_role;
+
+-- 3) get_monthly_revenue(integer) -> jsonb
+do $$ begin
+  if not exists (
+    select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public' and p.proname = '_impl_get_monthly_revenue'
+  ) then
+    alter function public.get_monthly_revenue(integer) rename to _impl_get_monthly_revenue;
+  end if;
+end $$;
+revoke all on function public._impl_get_monthly_revenue(integer) from public, anon, authenticated, service_role;
+
+create or replace function public.get_monthly_revenue(p_months integer default 12)
+returns jsonb language plpgsql security definer stable set search_path = public as $$
+begin
+  if not public.is_frontend_staff() then
+    raise exception 'permission denied for staff-only function' using errcode = '42501';
+  end if;
+  return public._impl_get_monthly_revenue(p_months);
+end $$;
+revoke all on function public.get_monthly_revenue(integer) from public, anon;
+grant execute on function public.get_monthly_revenue(integer) to authenticated, service_role;
+
+-- 4) get_financial_summary(text, text) -> jsonb
+do $$ begin
+  if not exists (
+    select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public' and p.proname = '_impl_get_financial_summary'
+  ) then
+    alter function public.get_financial_summary(text, text) rename to _impl_get_financial_summary;
+  end if;
+end $$;
+revoke all on function public._impl_get_financial_summary(text, text) from public, anon, authenticated, service_role;
+
+create or replace function public.get_financial_summary(p_from text, p_to text)
+returns jsonb language plpgsql security definer stable set search_path = public as $$
+begin
+  if not public.is_frontend_staff() then
+    raise exception 'permission denied for staff-only function' using errcode = '42501';
+  end if;
+  return public._impl_get_financial_summary(p_from, p_to);
+end $$;
+revoke all on function public.get_financial_summary(text, text) from public, anon;
+grant execute on function public.get_financial_summary(text, text) to authenticated, service_role;
+
+-- 5) get_technician_metrics(text, text) -> jsonb
+do $$ begin
+  if not exists (
+    select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public' and p.proname = '_impl_get_technician_metrics'
+  ) then
+    alter function public.get_technician_metrics(text, text) rename to _impl_get_technician_metrics;
+  end if;
+end $$;
+revoke all on function public._impl_get_technician_metrics(text, text) from public, anon, authenticated, service_role;
+
+create or replace function public.get_technician_metrics(p_from text, p_to text)
+returns jsonb language plpgsql security definer stable set search_path = public as $$
+begin
+  if not public.is_frontend_staff() then
+    raise exception 'permission denied for staff-only function' using errcode = '42501';
+  end if;
+  return public._impl_get_technician_metrics(p_from, p_to);
+end $$;
+revoke all on function public.get_technician_metrics(text, text) from public, anon;
+grant execute on function public.get_technician_metrics(text, text) to authenticated, service_role;
+
+-- 6) get_inventory_stock(bigint[]) -> TABLE(...)
+do $$ begin
+  if not exists (
+    select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public' and p.proname = '_impl_get_inventory_stock'
+  ) then
+    alter function public.get_inventory_stock(bigint[]) rename to _impl_get_inventory_stock;
+  end if;
+end $$;
+revoke all on function public._impl_get_inventory_stock(bigint[]) from public, anon, authenticated, service_role;
+
+create or replace function public.get_inventory_stock(p_product_ids bigint[] default null::bigint[])
+returns table(
+  product_id bigint,
+  total_in bigint,
+  total_sold_job bigint,
+  total_sold_sale bigint,
+  total_sold bigint,
+  available bigint,
+  oversold bigint,
+  avg_purchase_cost numeric,
+  last_stock_date date,
+  place text
+)
+language plpgsql security definer stable set search_path = public as $$
+begin
+  if not public.is_frontend_staff() then
+    raise exception 'permission denied for staff-only function' using errcode = '42501';
+  end if;
+  return query select * from public._impl_get_inventory_stock(p_product_ids);
+end $$;
+revoke all on function public.get_inventory_stock(bigint[]) from public, anon;
+grant execute on function public.get_inventory_stock(bigint[]) to authenticated, service_role;
+
+-- 7) next_job_id() -> integer (WRITE: counter increment)
+do $$ begin
+  if not exists (
+    select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public' and p.proname = '_impl_next_job_id'
+  ) then
+    alter function public.next_job_id() rename to _impl_next_job_id;
+  end if;
+end $$;
+revoke all on function public._impl_next_job_id() from public, anon, authenticated, service_role;
+
+create or replace function public.next_job_id()
+returns integer language plpgsql security definer set search_path = public as $$
+begin
+  if not public.is_frontend_staff() then
+    raise exception 'permission denied for staff-only function' using errcode = '42501';
+  end if;
+  return public._impl_next_job_id();
+end $$;
+revoke all on function public.next_job_id() from public, anon;
+grant execute on function public.next_job_id() to authenticated, service_role;
+
+-- 8) peek_next_job_id() -> integer (read-only preview)
+do $$ begin
+  if not exists (
+    select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public' and p.proname = '_impl_peek_next_job_id'
+  ) then
+    alter function public.peek_next_job_id() rename to _impl_peek_next_job_id;
+  end if;
+end $$;
+revoke all on function public._impl_peek_next_job_id() from public, anon, authenticated, service_role;
+
+create or replace function public.peek_next_job_id()
+returns integer language plpgsql security definer stable set search_path = public as $$
+begin
+  if not public.is_frontend_staff() then
+    raise exception 'permission denied for staff-only function' using errcode = '42501';
+  end if;
+  return public._impl_peek_next_job_id();
+end $$;
+revoke all on function public.peek_next_job_id() from public, anon;
+grant execute on function public.peek_next_job_id() to authenticated, service_role;
+
+-- 9) reset_sequence(text) -> text (CRITICAL: arbitrary setval = DoS)
+do $$ begin
+  if not exists (
+    select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public' and p.proname = '_impl_reset_sequence'
+  ) then
+    alter function public.reset_sequence(text) rename to _impl_reset_sequence;
+  end if;
+end $$;
+revoke all on function public._impl_reset_sequence(text) from public, anon, authenticated, service_role;
+
+create or replace function public.reset_sequence(p_table_name text)
+returns text language plpgsql security definer set search_path = public as $$
+begin
+  if not public.is_frontend_staff() then
+    raise exception 'permission denied for staff-only function' using errcode = '42501';
+  end if;
+  return public._impl_reset_sequence(p_table_name);
+end $$;
+revoke all on function public.reset_sequence(text) from public, anon;
+grant execute on function public.reset_sequence(text) to authenticated, service_role;
+
+-- PostgREST schema cache: naye wrappers/signatures turant dikhein.
+notify pgrst, 'reload schema';
+
+-- ---------------------------------------------------------------------------
+-- Verify (SQL editor / psql ke liye â€” migration ka hissa nahi):
+--
+-- 1) Koi function anon ya PUBLIC execute-able nahi hona chahiye:
+--    select p.proname, p.proacl
+--    from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+--    where n.nspname = 'public' and p.proname not like '\_impl\_%'
+--    order by 1;
+--    -- expected: kisi bhi proacl me '=X' ya 'anon=X' nahi
+--
+-- 2) Wrappers ka guard test (read-only transaction):
+--    begin;
+--    set local role authenticated;
+--    set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-000000000001","role":"authenticated"}';
+--    select public.get_dashboard_stats('2026-11-01','2026-11-22'); -- 42501 chahiye
+--    rollback;
+--
+--    begin;
+--    set local role authenticated;
+--    set local request.jwt.claims = '{"sub":"<staff-uuid>","role":"authenticated"}';
+--    select public.get_dashboard_stats('2026-11-01','2026-11-22'); -- data chahiye
+--    rollback;
+--
+-- 3) anon REST: 9 RPCs -> 401; staff login -> dashboard/clients/jobs OK.
+-- ---------------------------------------------------------------------------
+
+-- ════════════════════════════════════════════════════════════════════════
+-- FOLD-IN: 20261122_service_center_fields.sql (P1 Service Center Data Model)
+-- additive-only, NULLABLE columns, no backfill, brands/service_types master
+-- tables with is_frontend_staff() RLS + anon deny, mode KV in system_info.
+-- ════════════════════════════════════════════════════════════════════════
+
+create table if not exists public.brands (
+  id             serial primary key,
+  name           text not null unique,
+  code           varchar(10) unique,
+  is_authorized  boolean not null default false,
+  authorized_no  text,
+  logo_url       text,
+  support_phone  text,
+  support_email  text,
+  is_active      boolean not null default true,
+  date_created   timestamptz not null default now(),
+  date_updated   timestamptz not null default now()
+);
+
+create table if not exists public.service_types (
+  id          serial primary key,
+  name        text not null unique,
+  sort_order  smallint not null default 0,
+  is_active   boolean not null default true
+);
+
+insert into public.brands (name, code, is_authorized, is_active)
+values ('General / Unbranded', 'GEN', false, true)
+on conflict (name) do nothing;
+
+insert into public.service_types (name, sort_order, is_active) values
+  ('Repair / Service', 0, true),
+  ('New Installation', 10, true),
+  ('Warranty Claim', 20, true),
+  ('AMC / Service Visit', 30, true),
+  ('PDI / Delivery', 40, true),
+  ('Inspection / Estimate', 50, true),
+  ('Doorstep Visit', 60, true)
+on conflict (name) do nothing;
+
+alter table public.transaction_list
+  add column if not exists brand_id integer,
+  add column if not exists item_category text,
+  add column if not exists model text,
+  add column if not exists serial_no text,
+  add column if not exists service_type_id integer,
+  add column if not exists warranty_status text,
+  add column if not exists warranty_until date,
+  add column if not exists warranty_claim_no text,
+  add column if not exists warranty_claim_status text;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'transaction_list_brand_id_fkey'
+      and conrelid = 'public.transaction_list'::regclass
+  ) then
+    alter table public.transaction_list
+      add constraint transaction_list_brand_id_fkey
+      foreign key (brand_id) references public.brands(id) on delete restrict;
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'transaction_list_service_type_id_fkey'
+      and conrelid = 'public.transaction_list'::regclass
+  ) then
+    alter table public.transaction_list
+      add constraint transaction_list_service_type_id_fkey
+      foreign key (service_type_id) references public.service_types(id) on delete restrict;
+  end if;
+end $$;
+
+create index if not exists transaction_list_brand_id_idx
+  on public.transaction_list (brand_id);
+create index if not exists transaction_list_service_type_id_idx
+  on public.transaction_list (service_type_id);
+create index if not exists transaction_list_serial_no_idx
+  on public.transaction_list (serial_no)
+  where serial_no is not null;
+
+insert into public.system_info (meta_field, meta_value)
+select 'service_center_mode', 'autonomous'
+where not exists (
+  select 1 from public.system_info where meta_field = 'service_center_mode'
+);
+
+create or replace function public.touch_brands()
+returns trigger language plpgsql as $$
+begin
+  new.date_updated = now();
+  return new;
+end;
+$$;
+revoke all on function public.touch_brands() from public, anon, authenticated;
+
+drop trigger if exists brands_touch on public.brands;
+create trigger brands_touch
+  before update on public.brands
+  for each row execute function public.touch_brands();
+
+alter table public.brands enable row level security;
+alter table public.service_types enable row level security;
+
+drop policy if exists rlslock_brands_staff on public.brands;
+create policy rlslock_brands_staff on public.brands
+  for all to authenticated
+  using (public.is_frontend_staff())
+  with check (public.is_frontend_staff());
+
+drop policy if exists rlslock_service_types_staff on public.service_types;
+create policy rlslock_service_types_staff on public.service_types
+  for all to authenticated
+  using (public.is_frontend_staff())
+  with check (public.is_frontend_staff());
+
+grant all on table public.brands to anon;
+grant all on table public.brands to authenticated;
+grant all on table public.brands to service_role;
+grant usage, select on sequence public.brands_id_seq to anon, authenticated, service_role;
+
+grant all on table public.service_types to anon;
+grant all on table public.service_types to authenticated;
+grant all on table public.service_types to service_role;
+grant usage, select on sequence public.service_types_id_seq to anon, authenticated, service_role;
+
+notify pgrst, 'reload schema';
+

@@ -5,6 +5,8 @@
 **DB:** Supabase (existing live project, schema `20260913000000_final_full_schema_idempotent.sql`)
 **Status:** Phases 0–8 implemented (2026-11-01) — six modules + hardening. Verification: §3.1.
 
+**Naming:** **v1** = `vtech-frontend` (`v-tech-software`, `C:\next-vtech\vtech-frontend`) — existing app, shared DB aur `migrations/` ka owner. **v2** = ye repo (`vtech-next-v2`), zero-DDL admin panel. Client parity plan: [clients-parity-plan.md](clients-parity-plan.md).
+
 ---
 
 ## 0. Locked decisions (user-confirmed)
@@ -100,49 +102,49 @@ Purane app (`..\vtech-frontend`) ke perf audit + fresh schema scan se:
 
 ## 3. Target architecture
 
-### 3.1 Stack — pinned latest versions (npm check: 2026-11-01)
+### 3.1 Stack — pinned latest versions (npm check: 2026-11-03)
 
 Sab exact versions `package.json` me pin honge (`^`/`~` nahi) + `package-lock.json` commit. Sab **free/open-source** hain.
 
 | Layer | Package | Version | License |
 | --- | --- | --- | --- |
-| Framework | `next` | **16.4.3** | MIT |
+| Framework | `next` | **16.4.4** | MIT |
 | UI runtime | `react` / `react-dom` | **19.3.1** | MIT |
 | Language | `typescript` | **6.0.3** | Apache-2.0 |
 | Types (Node 24 runtime) | `@types/node` | **24.19.2** | MIT |
 | Types | `@types/react` / `@types/react-dom` | **19.3.0** | MIT |
-| Styling | `tailwindcss` + `@tailwindcss/turbopack` | **4.3.3** | MIT |
-| CSS pipeline | Tailwind Turbopack loader (`next.config.ts` rule) | 4.3.3 | MIT |
+| Styling | `tailwindcss` + `@tailwindcss/turbopack` | **4.3.4** | MIT |
+| CSS pipeline | Tailwind Turbopack loader (`next.config.ts` rule) | 4.3.4 | MIT |
 | UI primitives | `radix-ui` | **1.8.1** | MIT |
 | shadcn helpers | `class-variance-authority` / `clsx` / `tailwind-merge` | **0.7.1** / **2.1.1** / **3.7.0** | MIT |
 | Theme | `next-themes` | **0.4.6** | MIT |
 | DB | `@supabase/supabase-js` | **2.118.0** | MIT |
 | SSR auth | `@supabase/ssr` | **0.12.7** | MIT |
-| Client cache | `@tanstack/react-query` | **5.105.1** | MIT |
+| Client cache | `@tanstack/react-query` | **5.105.3** | MIT |
 | Forms | `react-hook-form` | **7.91.0** | MIT |
 | Validation | `zod` | **4.6.7** | MIT |
 | Form resolver | `@hookform/resolvers` | **7.0.1** | MIT |
 | Dates | `date-fns` | **4.4.0** | MIT |
 | IST timezone safety | `@date-fns/tz` | **1.5.0** | MIT |
 | RUM (optional) | `web-vitals` | **6.2.3** | Apache-2.0 |
-| Icons | `lucide-react` | **1.66.0** | ISC |
+| Icons | `lucide-react` | **1.67.0** | ISC |
 | Toasts | `sonner` | **2.0.8** | MIT |
 | Server guard | `server-only` | **0.0.1** | MIT |
 | Image optimization | `sharp` | **0.35.5** | Apache-2.0 |
-| Test runner | `vitest` + `@vitest/coverage-v8` | **5.0.5** | MIT |
-| Test bundler | `vite` + `@vitejs/plugin-react` | **8.3.5** / **6.1.2** | MIT |
+| Test runner | `vitest` + `@vitest/coverage-v8` | **5.1.0** | MIT |
+| Test bundler | `vite` + `@vitejs/plugin-react` | **8.3.5** / **6.2.1** | MIT |
 | DOM env | `jsdom` | **30.1.3** | MIT |
 | React testing | `@testing-library/react` / `jest-dom` | **16.3.3** / **7.0.1** | MIT |
 | E2E | `@playwright/test` | **1.64.1** | Apache-2.0 |
-| Lint | `eslint` + `eslint-config-next` | **10.14.0** / **16.4.3** | MIT |
+| Lint | `eslint` + `eslint-config-next` | **10.14.0** / **16.4.4** | MIT |
 | Format | `prettier` | **3.9.10** | MIT |
 | Tailwind class sort (dev) | `prettier-plugin-tailwindcss` | **0.8.1** | MIT |
 | License gate (dev) | `license-checker` | **25.0.1** | BSD-3-Clause |
 | React Compiler (dev) | `babel-plugin-react-compiler` | **1.0.0** | MIT |
 | Supabase CLI (dev) | `supabase` | **2.122.0** | MIT |
 | E2E accessibility (dev) | `@axe-core/playwright` | **4.14.0** | MPL-2.0 |
-| Bundle analyzer (dev) | `@next/bundle-analyzer` | **16.4.3** | MIT |
-| Perf gate (dev) | `@lhci/cli` | **0.15.1** | Apache-2.0 |
+| Bundle analyzer (dev) | `@next/bundle-analyzer` | **16.4.4** | MIT |
+| Perf gate (dev) | `@lhci/cli` | **0.16.0** | Apache-2.0 |
 | Bundle gate (dev) | `size-limit` + `@size-limit/preset-app` | **14.3.0** | MIT |
 
 **Compatibility notes (honest):**
@@ -150,6 +152,20 @@ Sab exact versions `package.json` me pin honge (`^`/`~` nahi) + `package-lock.js
 - **TypeScript 6.0.3** (not 7.0.2): TS 7 build/typecheck pass karta hai, par `typescript-eslint` (jo `eslint-config-next` ke andar hai) TS 7 ko **explicitly reject** karta hai — `npm run lint` fail hota hai (2026-11-01 verify). Isliye lint gate ke liye latest TS 6 pin. TS 7 support aane par bump karenge.
 - `@types/node` **24.x** (26.x nahi) — runtime Node 24 se match.
 - `radix-ui` unified package use hoga; shadcn CLI jo bhi transitive deps laaye, wahi pinned lockfile me jayenge.
+
+**Dependency refresh (2026-11-03, zero DDL):**
+
+| Package | Bump |
+| --- | --- |
+| `next` / `eslint-config-next` / `@next/bundle-analyzer` | 16.4.3 → **16.4.4** |
+| `tailwindcss` / `@tailwindcss/turbopack` | 4.3.3 → **4.3.4** |
+| `@tanstack/react-query` | 5.105.1 → **5.105.3** |
+| `lucide-react` | 1.66.0 → **1.67.0** |
+| `@vitejs/plugin-react` | 6.1.2 → **6.2.1** |
+| `vitest` / `@vitest/coverage-v8` | 5.0.5 → **5.1.0** |
+| CI actions | `checkout@v4` → **v7**, `setup-node@v4` → **v7** |
+
+Verification: typecheck + lint clean, unit **60 pass**, production build (25 routes), size-limit **276.67 kB** JS / **7.62 kB** CSS, `npm audit --omit=dev` **0 vulnerabilities**, both license gates green (all-deps allowlist me OSI-approved **PSF-2.0** add hua — `argparse@3` via `js-yaml`). Deliberately held: TypeScript **7.0.2** (`typescript-eslint` reject — decision #10), `@types/node` **26.x** (runtime Node 24), `supabase` CLI **3.0.0** (major bump), aur `@lhci/cli` **0.16.0** (lighthouse 13 → `@sentry/bundler-plugins` → `sentry@0.45.0` **FSL-1.1-Apache-2.0**, non-OSI; OSS-only policy ke saath conflict — 0.15.1 par hold).
 
 **Compatibility smoke test (2026-11-01, temp project):**
 
@@ -448,7 +464,7 @@ Sirf wahi tech adopt kar rahe hain jo **free/OSS**, **stable**, aur is app ke sp
 | **`web-vitals` → `/api/vitals`** | 6.2.3 | Free RUM (LCP/INP/CLS) Vercel logs me; koi paid analytics nahi. | Phase 8 |
 | **`pg_stat_statements`** | Postgres extension | Slow query ranking; `EXPLAIN` se RPC verify. Free. | Phase 1 |
 | **Second free Supabase project = staging** | Free plan 2 projects | Future optional DDL pack test karne ke liye; v1 zero-DDL hai isliye abhi zaroorat nahi. | Deferred |
-| **Bundle analyzer + size-limit** | 16.4.3 / 14.3.0 | Route JS budget CI me enforce. | Phase 0 |
+| **Bundle analyzer + size-limit** | 16.4.4 / 14.3.0 | Route JS budget CI me enforce. | Phase 0 |
 
 #### Deferred (v2 ke baad, reason ke saath)
 
@@ -726,7 +742,7 @@ Tabs:
 - **E2E (Playwright):** login → dashboard; client CRUD (**double-gated**: `E2E_MUTATIONS=1` + `E2E_ALLOW_LIVE_DB_WRITES=1`); job create → status flow; sale create; attendance mark/self-checkin; settings save. Mobile 390px overflow check (`e2e/mobile.spec.ts`).
 - **Accessibility (axe):** har e2e page par `@axe-core/playwright` — critical/serious violations fail (login, dashboard, har list/detail).
 - **Perf:** Lighthouse CI budgets (§3.3); `size-limit` route JS budgets; `web-vitals` beacons (`/api/vitals` logs) se real p75; `EXPLAIN ANALYZE` for 6 RPCs.
-- **Supply chain (free):** `license-checker` allowlist (production strict — sirf permissive; dev me MPL-2.0 sirf axe + data licenses CC-BY), `npm audit --omit=dev` (0 prod vulns), `npm outdated` report, Dependabot weekly PRs.
+- **Supply chain (free):** `license-checker` allowlist (production strict — sirf permissive; `sharp` libvips binaries ke liye pinned `--excludePackages` exception, `ci.yml` me documented), `npm audit --omit=dev` (0 prod vulns), `npm outdated` report, Dependabot weekly PRs.
 - **Data safety:** v1 **zero DDL** — koi migration nahi. Writes existing constraints par; e2e se pehle read-only audit queries, phir non-peak me ek test client/job. Staging project sirf future optional pack ke liye.
 - **Regression:** role matrix (admin/developer/staff) — staff ko settings write nahi, developer ko nahi (jab tak policy fix na ho).
 
@@ -767,12 +783,12 @@ Tabs:
 ## 12. Definition of done (Phase 1)
 
 - [x] 6 modules production build par, role matrix correct (settings admin/developer read + admin write, staff hidden; financial totals admin/developer only; team creation admin-only; delete admin+developer; audit write admin+staff — DB RLS ke mutabik).
-- [x] Authed perf budgets: Lighthouse desktop (prod build) — dashboard 86, jobs 100, clients 100; a11y 99/99/99; size-limit JS 260.4 kB ≤ 320 kB, CSS 7.3 kB ≤ 60 kB.
+- [x] Authed perf budgets: Lighthouse desktop (prod build, 2026-11-02 run) — dashboard 86, jobs 100, clients 100; a11y 99/99/99; size-limit (dependency bump ke baad, 2026-11-03) JS 276.67 kB ≤ 320 kB, CSS 7.62 kB ≤ 60 kB.
 - [x] Har page ≤ 2 sequential DB round-trips; koi `select('*')`/waterfall nahi (ESLint ban).
 - [x] Create flows existing objects par: `next_job_id()` + insert, `save_direct_sale` RPC, attendance unique-day upsert; `code`/`sale_code` post-insert verify + retry.
 - [ ] RLS write paths live-tested (staff/developer/admin) — code aur policy review complete; live mutation tests user approval ke bina pending.
 - [x] **Zero DDL verified**: koi migration/table/column/policy/function/index change nahi; sirf read-only queries chali.
-- [x] CI: typecheck + lint + unit (59) + e2e (smoke + axe + mobile + team + login + profile) + Lighthouse budgets + size-limit + license allowlist + `npm audit` green.
+- [x] CI (GitHub Actions): typecheck + lint + unit (60) + license allowlist (prod + all deps) + `npm audit --omit=dev` + production build. E2E (smoke + axe + mobile + team + login + profile), Lighthouse budgets aur size-limit local prod build par green — live credentials chahiye hone ki wajah se CI me nahi chalte.
 - [ ] Vercel (free) deploy + GitHub Actions keep-warm cron — deploy user approval ke bina pending.
 - [x] Koi paid service/subscription integrate nahi hui (deps 100% OSS).
 
@@ -789,12 +805,12 @@ Tabs:
     "@hookform/resolvers": "7.0.1",
     "@supabase/ssr": "0.12.7",
     "@supabase/supabase-js": "2.118.0",
-    "@tanstack/react-query": "5.105.1",
+    "@tanstack/react-query": "5.105.3",
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",
     "date-fns": "4.4.0",
-    "lucide-react": "1.66.0",
-    "next": "16.4.3",
+    "lucide-react": "1.67.0",
+    "next": "16.4.4",
     "next-themes": "0.4.6",
     "radix-ui": "1.8.1",
     "react": "19.3.1",
@@ -810,31 +826,31 @@ Tabs:
   },
   "devDependencies": {
     "@axe-core/playwright": "4.14.0",
-    "@lhci/cli": "0.15.1",
-    "@next/bundle-analyzer": "16.4.3",
+    "@lhci/cli": "0.16.0",
+    "@next/bundle-analyzer": "16.4.4",
     "@playwright/test": "1.64.1",
     "@size-limit/preset-app": "14.3.0",
-    "@tailwindcss/turbopack": "4.3.3",
+    "@tailwindcss/turbopack": "4.3.4",
     "@testing-library/jest-dom": "7.0.1",
     "@testing-library/react": "16.3.3",
     "@types/node": "24.19.2",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
-    "@vitejs/plugin-react": "6.1.2",
-    "@vitest/coverage-v8": "5.0.5",
+    "@vitejs/plugin-react": "6.2.1",
+    "@vitest/coverage-v8": "5.1.0",
     "babel-plugin-react-compiler": "1.0.0",
     "eslint": "10.14.0",
-    "eslint-config-next": "16.4.3",
+    "eslint-config-next": "16.4.4",
     "jsdom": "30.1.3",
     "license-checker": "25.0.1",
     "prettier": "3.9.10",
     "prettier-plugin-tailwindcss": "0.8.1",
     "size-limit": "14.3.0",
     "supabase": "2.122.0",
-    "tailwindcss": "4.3.3",
+    "tailwindcss": "4.3.4",
     "typescript": "6.0.3",
     "vite": "8.3.5",
-    "vitest": "5.0.5"
+    "vitest": "5.1.0"
   }
 }
 ```
@@ -952,6 +968,12 @@ Search/filter UX, zero DDL (sirf existing `ilike`/PostgREST queries):
 - Logged user top bar me: avatar + naam/role (mobile par sirf avatar) se dropdown — **My profile** aur **Logout** wahin se. Sidebar footer ka duplicate user chip hataya; sidebar nav me Profile link bacha hai.
 - Menu: outside click / Escape close, `aria-expanded` + `aria-controls`, axe clean (desktop + 390px).
 
+### Brand assets (2026-11-03)
+
+- Service-repair identity: navy rounded badge + white wrench + cyan spark. Source SVGs: `public/brand/vtech-icon.svg` (symbol) aur `vtech-wordmark.svg` (symbol + **VTECH / PRO V2** wordmark).
+- `npm run icons` (`scripts/generate-icons.mjs`, sharp) se `src/app/icon.png` (512, wordmark), `apple-icon.png` (180, wordmark), `favicon.ico` (16/32/48, symbol-only — 16px par text illegible) aur PWA `public/icons/icon-192.png`, `icon-512.png` (wordmark), `maskable-512.png` (symbol-only; text mask safe-zone se bahar chala jata) generate hote hain.
+- `src/app/manifest.ts` — standalone PWA metadata (`/manifest.webmanifest`), Next file conventions se icons auto-linked.
+
 ### Verification (2026-11-01)
 
 | Check | Result |
@@ -967,6 +989,7 @@ Search/filter UX, zero DDL (sirf existing `ilike`/PostgREST queries):
 | `/api/vitals` | 204 valid, 400 invalid enum, 400 oversize |
 | Security headers | CSP nonce + HSTS + Permissions-Policy live verified |
 | CRUD e2e | skipped by design (`E2E_MUTATIONS=1` **and** `E2E_ALLOW_LIVE_DB_WRITES=1` chahiye) |
+| Brand icons | `/favicon.ico`, `/icon.png`, `/apple-icon.png`, `/manifest.webmanifest`, PWA 192/512/maskable — 200 + sahi content types; `<link rel="icon|apple-touch-icon|manifest">` present |
 
 ### Local caveats
 

@@ -7,6 +7,15 @@ import { requireSession } from "@/lib/auth";
 import { recordActivity } from "@/lib/data/audit";
 import { DataError } from "@/lib/data/errors";
 import { saveSettings, type SettingsMap } from "@/lib/data/settings";
+import {
+  createBrand,
+  createServiceType,
+  listBrands,
+  SERVICE_CENTER_MODES,
+  setBrandActive,
+  setServiceTypeActive,
+  updateBrand,
+} from "@/lib/data/service-center";
 import { uploadMediaImage } from "@/lib/data/storage";
 import {
   countOtherAdmins,
@@ -476,4 +485,250 @@ function parseAttendance(formData: FormData): SettingsMap {
   }
 
   return entries;
+}
+
+// ── Service Center (P1) ────────────────────────────────────────────────
+
+async function requireSettingsAdmin() {
+  const session = await requireSession();
+  if (!canManageSettings(session.profile.role)) {
+    return {
+      error: "Service Center settings sirf admin badal sakta hai.",
+      session: null,
+    };
+  }
+  return { error: null, session };
+}
+
+function parseId(value: FormDataEntryValue | null): number {
+  if (typeof value !== "string" || !/^\d+$/.test(value)) return 0;
+  return Number(value);
+}
+
+function checkbox(value: FormDataEntryValue | null): boolean {
+  return value === "on" || value === "1" || value === "true";
+}
+
+const brandSchema = z.object({
+  name: z
+    .string()
+    .trim()
+    .min(2, "Brand naam likhna zaroori hai.")
+    .max(80, "Brand naam 80 characters se chhota rakhein."),
+  code: z
+    .string()
+    .trim()
+    .max(10)
+    .transform((v) => v || null),
+  authorized_no: z
+    .string()
+    .trim()
+    .max(60)
+    .transform((v) => v || null),
+  support_phone: z
+    .string()
+    .trim()
+    .max(30)
+    .transform((v) => v || null),
+  support_email: z
+    .union([z.literal(""), z.email("Support email sahi nahi hai.")])
+    .transform((v) => v || null),
+});
+
+export async function saveServiceCenterModeAction(
+  _previous: SettingsActionState,
+  formData: FormData,
+): Promise<SettingsActionState> {
+  const guard = await requireSettingsAdmin();
+  if (guard.error) return { error: guard.error };
+  const session = guard.session!;
+
+  const mode = String(formData.get("mode") ?? "");
+  if (
+    !SERVICE_CENTER_MODES.includes(
+      mode as (typeof SERVICE_CENTER_MODES)[number],
+    )
+  ) {
+    return { error: "Operating mode sahi nahi hai." };
+  }
+
+  try {
+    await saveSettings({ service_center_mode: mode });
+    await recordActivity(session, {
+      module: "Settings",
+      action: "update",
+      metaId: "service_center_mode",
+      details: mode,
+    });
+    updateTag("system-info");
+    revalidatePath("/settings");
+    revalidatePath("/jobs/new");
+    revalidatePath("/jobs");
+
+    const brands = await listBrands();
+    const authorized = brands.filter((b) => b.is_authorized && b.is_active);
+    const warning =
+      mode === "single_brand" && authorized.length >= 2
+        ? `⚠️ ${authorized.length} authorized brands hain — multi_brand mode zyada sahi rahega.`
+        : undefined;
+    return { error: null, message: warning ?? "Operating mode save ho gaya." };
+  } catch (error) {
+    return { error: friendlyError(error, "Mode save nahi hua.") };
+  }
+}
+
+export async function saveBrandAction(
+  _previous: SettingsActionState,
+  formData: FormData,
+): Promise<SettingsActionState> {
+  const guard = await requireSettingsAdmin();
+  if (guard.error) return { error: guard.error };
+  const session = guard.session!;
+
+  const parsed = brandSchema.safeParse({
+    name: formData.get("name") ?? "",
+    code: formData.get("code") ?? "",
+    authorized_no: formData.get("authorized_no") ?? "",
+    support_phone: formData.get("support_phone") ?? "",
+    support_email: formData.get("support_email") ?? "",
+  });
+  if (!parsed.success) {
+    return {
+      error: parsed.error.issues[0]?.message ?? "Brand details sahi nahi hain.",
+    };
+  }
+  const input = {
+    name: parsed.data.name,
+    code: parsed.data.code,
+    isAuthorized: checkbox(formData.get("is_authorized")),
+    authorizedNo: parsed.data.authorized_no,
+    supportPhone: parsed.data.support_phone,
+    supportEmail: parsed.data.support_email,
+  };
+
+  try {
+    const id = parseId(formData.get("id"));
+    if (id > 0) await updateBrand(id, input);
+    else await createBrand(input);
+    await recordActivity(session, {
+      module: "Settings",
+      action: id > 0 ? "update" : "create",
+      metaId: id || input.name,
+      details: `Brand: ${input.name}`,
+    });
+    updateTag("system-info");
+    revalidatePath("/settings");
+    revalidatePath("/jobs/new");
+    revalidatePath("/jobs", "layout");
+    return { error: null, message: "Brand save ho gaya." };
+  } catch (error) {
+    return { error: friendlyError(error, "Brand save nahi hua.") };
+  }
+}
+
+export async function setBrandActiveAction(
+  _previous: SettingsActionState,
+  formData: FormData,
+): Promise<SettingsActionState> {
+  const guard = await requireSettingsAdmin();
+  if (guard.error) return { error: guard.error };
+  const session = guard.session!;
+  const id = parseId(formData.get("id"));
+  const active = checkbox(formData.get("is_active"));
+  if (!id) return { error: "Brand id sahi nahi hai." };
+
+  try {
+    await setBrandActive(id, active);
+    await recordActivity(session, {
+      module: "Settings",
+      action: "update",
+      metaId: id,
+      details: `Brand ${active ? "active" : "deactivated"}`,
+    });
+    revalidatePath("/settings");
+    revalidatePath("/jobs/new");
+    return {
+      error: null,
+      message: active
+        ? "Brand wapas active hua."
+        : "Brand deactivate ho gaya (delete nahi).",
+    };
+  } catch (error) {
+    return { error: friendlyError(error, "Brand update nahi hua.") };
+  }
+}
+
+const serviceTypeSchema = z.object({
+  name: z
+    .string()
+    .trim()
+    .min(2, "Service type naam likhna zaroori hai.")
+    .max(60, "Service type naam 60 characters se chhota rakhein."),
+  sort_order: z.coerce.number().int().min(0).max(1000),
+});
+
+export async function saveServiceTypeAction(
+  _previous: SettingsActionState,
+  formData: FormData,
+): Promise<SettingsActionState> {
+  const guard = await requireSettingsAdmin();
+  if (guard.error) return { error: guard.error };
+  const session = guard.session!;
+
+  const parsed = serviceTypeSchema.safeParse({
+    name: formData.get("name") ?? "",
+    sort_order: formData.get("sort_order") ?? 100,
+  });
+  if (!parsed.success) {
+    return {
+      error: parsed.error.issues[0]?.message ?? "Service type sahi nahi hai.",
+    };
+  }
+
+  try {
+    await createServiceType(parsed.data.name, parsed.data.sort_order);
+    await recordActivity(session, {
+      module: "Settings",
+      action: "create",
+      metaId: parsed.data.name,
+      details: `Service type: ${parsed.data.name}`,
+    });
+    revalidatePath("/settings");
+    revalidatePath("/jobs/new");
+    return { error: null, message: "Service type add ho gaya." };
+  } catch (error) {
+    return { error: friendlyError(error, "Service type save nahi hua.") };
+  }
+}
+
+export async function setServiceTypeActiveAction(
+  _previous: SettingsActionState,
+  formData: FormData,
+): Promise<SettingsActionState> {
+  const guard = await requireSettingsAdmin();
+  if (guard.error) return { error: guard.error };
+  const session = guard.session!;
+  const id = parseId(formData.get("id"));
+  const active = checkbox(formData.get("is_active"));
+  if (!id) return { error: "Service type id sahi nahi hai." };
+
+  try {
+    await setServiceTypeActive(id, active);
+    await recordActivity(session, {
+      module: "Settings",
+      action: "update",
+      metaId: id,
+      details: `Service type ${active ? "active" : "deactivated"}`,
+    });
+    revalidatePath("/settings");
+    revalidatePath("/jobs/new");
+    return {
+      error: null,
+      message: active
+        ? "Service type wapas active hua."
+        : "Service type deactivate ho gaya (delete nahi).",
+    };
+  } catch (error) {
+    return { error: friendlyError(error, "Service type update nahi hua.") };
+  }
 }

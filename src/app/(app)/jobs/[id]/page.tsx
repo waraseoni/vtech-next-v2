@@ -178,6 +178,72 @@ export default async function JobDetailPage({
             </CardContent>
           </Card>
 
+          {(job.brandName ||
+            job.model ||
+            job.serial_no ||
+            job.serviceTypeName ||
+            job.warranty_status) &&
+          job.id ? (
+            <Card className="gap-4 py-5">
+              <CardHeader className="px-5">
+                <CardTitle>Device &amp; warranty</CardTitle>
+                <CardDescription>
+                  Serial aur warranty status claim/warranty tracking ke liye.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="grid gap-4 px-5 sm:grid-cols-2">
+                <div>
+                  <p className="text-muted-foreground text-xs">Brand</p>
+                  <p className="mt-1 text-sm font-medium">
+                    {job.brandName ?? (
+                      <Badge variant="warning">Untagged (legacy)</Badge>
+                    )}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-muted-foreground text-xs">Service type</p>
+                  <p className="mt-1 text-sm font-medium">
+                    {job.serviceTypeName ?? "—"}
+                  </p>
+                </div>
+                {job.item_category ? (
+                  <div>
+                    <p className="text-muted-foreground text-xs">Category</p>
+                    <p className="mt-1 text-sm">{job.item_category}</p>
+                  </div>
+                ) : null}
+                {job.model ? (
+                  <div>
+                    <p className="text-muted-foreground text-xs">Model</p>
+                    <p className="mt-1 text-sm">{job.model}</p>
+                  </div>
+                ) : null}
+                {job.serial_no ? (
+                  <div>
+                    <p className="text-muted-foreground text-xs">
+                      Serial / IMEI
+                    </p>
+                    <p className="mt-1 font-mono text-sm">{job.serial_no}</p>
+                  </div>
+                ) : null}
+                {job.warranty_status ? (
+                  <div>
+                    <p className="text-muted-foreground text-xs">Warranty</p>
+                    <p className="mt-1 text-sm">{job.warranty_status}</p>
+                  </div>
+                ) : null}
+                {job.warranty_claim_no ? (
+                  <div>
+                    <p className="text-muted-foreground text-xs">Claim no</p>
+                    <p className="mt-1 font-mono text-sm">
+                      {job.warranty_claim_no}
+                    </p>
+                  </div>
+                ) : null}
+              </CardContent>
+            </Card>
+          ) : null}
+
           <Card className="gap-0 overflow-hidden py-0">
             <CardHeader className="border-b px-5 py-4">
               <CardTitle>Services & parts</CardTitle>

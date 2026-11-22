@@ -8,6 +8,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { LiveSearchInput } from "@/components/ui/live-search-input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import { Select } from "@/components/ui/select";
+import { listBrands, listServiceTypes } from "@/lib/data/service-center";
 import { getJobsPage, getMechanicOptions } from "@/lib/data/jobs";
 import { formatIST } from "@/lib/date";
 import {
@@ -25,6 +27,9 @@ type JobsSearch = {
   q?: string;
   status?: number;
   mechanic?: number;
+  brand?: number;
+  type?: number;
+  untagged?: boolean;
   from?: string;
   to?: string;
   page?: number;
@@ -37,6 +42,9 @@ function jobsHref(params: JobsSearch): string {
     search.set("status", String(params.status));
   }
   if (params.mechanic) search.set("mechanic", String(params.mechanic));
+  if (params.brand) search.set("brand", String(params.brand));
+  if (params.type) search.set("type", String(params.type));
+  if (params.untagged) search.set("untagged", "1");
   if (params.from) search.set("from", params.from);
   if (params.to) search.set("to", params.to);
   if (params.page && params.page > 1) search.set("page", String(params.page));
@@ -61,29 +69,54 @@ export default async function JobsPage({ searchParams }: PageProps<"/jobs">) {
     Number.isSafeInteger(mechanicRaw) && mechanicRaw > 0
       ? mechanicRaw
       : undefined;
+  const brandRaw =
+    typeof params.brand === "string" ? Number(params.brand) : NaN;
+  const brand =
+    Number.isSafeInteger(brandRaw) && brandRaw > 0 ? brandRaw : undefined;
+  const typeRaw = typeof params.type === "string" ? Number(params.type) : NaN;
+  const serviceType =
+    Number.isSafeInteger(typeRaw) && typeRaw > 0 ? typeRaw : undefined;
+  const untagged = params.untagged === "1";
   const from = typeof params.from === "string" ? params.from : "";
   const to = typeof params.to === "string" ? params.to : "";
   const pageRaw = typeof params.page === "string" ? Number(params.page) : 1;
   const page =
     Number.isFinite(pageRaw) && pageRaw > 0 ? Math.floor(pageRaw) : 1;
 
-  const [data, mechanics] = await Promise.all([
+  const [data, mechanics, brands, serviceTypes] = await Promise.all([
     getJobsPage({
       search: q,
       status,
       mechanicId: mechanic,
+      brandId: brand,
+      serviceTypeId: serviceType,
+      untaggedOnly: untagged,
       from: from || undefined,
       to: to || undefined,
       page,
       pageSize: PAGE_SIZE,
     }),
     getMechanicOptions(),
+    listBrands(),
+    listServiceTypes(),
   ]);
 
   const totalPages = Math.max(1, Math.ceil(data.total / data.pageSize));
   const start = data.total === 0 ? 0 : (data.page - 1) * data.pageSize + 1;
   const end = start + data.rows.length - 1;
-  const filtered = Boolean(q || status !== undefined || mechanic || from || to);
+  const filtered = Boolean(
+    q ||
+    status !== undefined ||
+    mechanic ||
+    brand ||
+    serviceType ||
+    untagged ||
+    from ||
+    to,
+  );
+  const coveragePct = data.coverage.total
+    ? Math.round((data.coverage.tagged / data.coverage.total) * 100)
+    : 0;
 
   return (
     <div className="mx-auto max-w-7xl space-y-5">
@@ -96,6 +129,26 @@ export default async function JobsPage({ searchParams }: PageProps<"/jobs">) {
           <p className="text-muted-foreground mt-1 text-sm">
             {new Intl.NumberFormat("en-IN").format(data.total)} jobs
             {filtered ? " filter ke saath" : ""}.
+          </p>
+          <p className="text-muted-foreground mt-1 text-xs">
+            Brand-tagged:{" "}
+            {new Intl.NumberFormat("en-IN").format(data.coverage.tagged)} /{" "}
+            {new Intl.NumberFormat("en-IN").format(data.coverage.total)} jobs (
+            {coveragePct}%) · Untagged (legacy):{" "}
+            <Link
+              href={jobsHref({
+                q,
+                status,
+                mechanic,
+                type: serviceType,
+                from,
+                to,
+                untagged: true,
+              })}
+              className="underline"
+            >
+              {new Intl.NumberFormat("en-IN").format(data.coverage.untagged)}
+            </Link>
           </p>
         </div>
         <Button asChild>
@@ -112,7 +165,19 @@ export default async function JobsPage({ searchParams }: PageProps<"/jobs">) {
           size="sm"
           variant={status === undefined ? "default" : "outline"}
         >
-          <Link href={jobsHref({ q, mechanic, from, to })}>All</Link>
+          <Link
+            href={jobsHref({
+              q,
+              mechanic,
+              brand,
+              type: serviceType,
+              untagged,
+              from,
+              to,
+            })}
+          >
+            All
+          </Link>
         </Button>
         {Object.entries(JOB_STATUS_LABELS).map(([value, label]) => {
           const code = Number(value) as JobStatus;
@@ -124,7 +189,18 @@ export default async function JobsPage({ searchParams }: PageProps<"/jobs">) {
               variant={status === code ? "default" : "outline"}
               className="shrink-0"
             >
-              <Link href={jobsHref({ q, mechanic, from, to, status: code })}>
+              <Link
+                href={jobsHref({
+                  q,
+                  mechanic,
+                  brand,
+                  type: serviceType,
+                  untagged,
+                  from,
+                  to,
+                  status: code,
+                })}
+              >
                 {label}
               </Link>
             </Button>
@@ -137,7 +213,7 @@ export default async function JobsPage({ searchParams }: PageProps<"/jobs">) {
           <form
             action="/jobs"
             method="get"
-            className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_160px_130px_130px_auto] lg:items-end"
+            className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_150px_150px_150px_130px_130px_auto] lg:items-end"
           >
             {status !== undefined ? (
               <input type="hidden" name="status" value={status} />
@@ -149,7 +225,7 @@ export default async function JobsPage({ searchParams }: PageProps<"/jobs">) {
               <LiveSearchInput
                 id="jobs-q"
                 defaultValue={q}
-                placeholder="Job id, code, item ya fault"
+                placeholder="Job id, code, item, serial ya fault"
                 ariaLabel="Search jobs"
               />
             </div>
@@ -174,6 +250,57 @@ export default async function JobsPage({ searchParams }: PageProps<"/jobs">) {
                 ]}
               />
             </div>
+            <div className="grid gap-1.5">
+              <label
+                htmlFor="jobs-brand"
+                className="text-muted-foreground text-xs"
+              >
+                Brand
+              </label>
+              <Select
+                id="jobs-brand"
+                name="brand"
+                defaultValue={brand ? String(brand) : ""}
+                disabled={untagged}
+              >
+                <option value="">All (incl. untagged)</option>
+                {brands.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.name}
+                  </option>
+                ))}
+              </Select>
+            </div>
+            <div className="grid gap-1.5">
+              <label
+                htmlFor="jobs-type"
+                className="text-muted-foreground text-xs"
+              >
+                Service type
+              </label>
+              <Select
+                id="jobs-type"
+                name="type"
+                defaultValue={serviceType ? String(serviceType) : ""}
+              >
+                <option value="">All</option>
+                {serviceTypes.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.name}
+                  </option>
+                ))}
+              </Select>
+            </div>
+            <label className="text-muted-foreground flex items-center gap-2 pb-2 text-xs">
+              <input
+                type="checkbox"
+                name="untagged"
+                value="1"
+                defaultChecked={untagged}
+                className="accent-primary size-4"
+              />
+              Untagged (legacy)
+            </label>
             <div className="grid gap-1.5">
               <label
                 htmlFor="jobs-from"
@@ -238,6 +365,16 @@ export default async function JobsPage({ searchParams }: PageProps<"/jobs">) {
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
+                        <div className="mb-1 flex flex-wrap gap-1">
+                          {row.brandName ? (
+                            <Badge variant="outline">{row.brandName}</Badge>
+                          ) : null}
+                          {row.serviceTypeName ? (
+                            <Badge variant="secondary">
+                              {row.serviceTypeName}
+                            </Badge>
+                          ) : null}
+                        </div>
                         <p className="truncate text-sm font-medium">
                           {row.item}
                         </p>
@@ -307,6 +444,23 @@ export default async function JobsPage({ searchParams }: PageProps<"/jobs">) {
                         )}
                       </td>
                       <td className="max-w-64 px-3 py-3">
+                        <div className="mb-1 flex flex-wrap items-center gap-1">
+                          {row.brandName ? (
+                            <Badge variant="outline">{row.brandName}</Badge>
+                          ) : (
+                            <Badge variant="warning">Untagged</Badge>
+                          )}
+                          {row.serviceTypeName ? (
+                            <Badge variant="secondary">
+                              {row.serviceTypeName}
+                            </Badge>
+                          ) : null}
+                          {row.serialNo ? (
+                            <span className="text-muted-foreground text-xs">
+                              S/N {row.serialNo}
+                            </span>
+                          ) : null}
+                        </div>
                         <p className="truncate font-medium">{row.item}</p>
                         <p className="text-muted-foreground truncate text-xs">
                           {row.fault}
@@ -351,6 +505,9 @@ export default async function JobsPage({ searchParams }: PageProps<"/jobs">) {
                         q,
                         status,
                         mechanic,
+                        brand,
+                        type: serviceType,
+                        untagged,
                         from,
                         to,
                         page: data.page - 1,
@@ -377,6 +534,9 @@ export default async function JobsPage({ searchParams }: PageProps<"/jobs">) {
                         q,
                         status,
                         mechanic,
+                        brand,
+                        type: serviceType,
+                        untagged,
                         from,
                         to,
                         page: data.page + 1,

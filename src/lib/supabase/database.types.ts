@@ -150,6 +150,27 @@ export type Database = {
         hsn: string;
       }>;
 
+      brands: Table<{
+        id: number;
+        name: string;
+        code: string | null;
+        is_authorized: boolean;
+        authorized_no: string | null;
+        logo_url: string | null;
+        support_phone: string | null;
+        support_email: string | null;
+        is_active: boolean;
+        date_created: string;
+        date_updated: string;
+      }>;
+
+      service_types: Table<{
+        id: number;
+        name: string;
+        sort_order: number;
+        is_active: boolean;
+      }>;
+
       product_list: Table<{
         id: number;
         name: string;
@@ -216,6 +237,15 @@ export type Database = {
         date_updated: string;
         date_completed: string | null;
         location_id: number | null;
+        brand_id: number | null;
+        item_category: string | null;
+        model: string | null;
+        serial_no: string | null;
+        service_type_id: number | null;
+        warranty_status: string | null;
+        warranty_until: string | null;
+        warranty_claim_no: string | null;
+        warranty_claim_status: string | null;
       }>;
 
       transaction_services: Table<{

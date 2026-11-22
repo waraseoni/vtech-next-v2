@@ -548,7 +548,7 @@ export default async function AttendancePage({
 
           <Card className="gap-0 overflow-hidden py-0">
             <div
-              className="overflow-x-auto"
+              className="relative overflow-x-auto"
               role="region"
               aria-label="Monthly attendance calendar"
               tabIndex={0}

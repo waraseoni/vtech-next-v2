@@ -18,7 +18,7 @@ export default async function EditClientPage({
   const detail = await getClientDetail(clientId);
   if (!detail) notFound();
 
-  const { client } = detail;
+  const { client, contacts } = detail;
 
   return (
     <div className="mx-auto max-w-3xl space-y-5">
@@ -46,6 +46,13 @@ export default async function EditClientPage({
           openingBalance: client.opening_balance ?? 0,
           paymentDueDate: client.payment_due_date ?? "",
           paymentDueRemarks: client.payment_due_remarks ?? "",
+          contacts: contacts.map((contact) => ({
+            id: contact.id,
+            name: contact.name ?? "",
+            label: contact.label,
+            phone: contact.phone,
+            isPrimary: contact.is_primary,
+          })),
         }}
       />
     </div>

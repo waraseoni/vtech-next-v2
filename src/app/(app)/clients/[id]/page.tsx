@@ -1,12 +1,16 @@
 import {
   ArrowLeft,
   ArrowUpRight,
+  CalendarClock,
+  FileText,
   HandCoins,
   Landmark,
   MessageCircle,
   Pencil,
   Phone,
+  Plus,
   ReceiptIndianRupee,
+  ShoppingCart,
   Wallet,
   Wrench,
   type LucideIcon,
@@ -15,6 +19,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 
 import { DeleteClientButton } from "@/components/clients/delete-client-button";
+import { LoanActions } from "@/components/clients/loan-actions";
 import { JobStatusBadge } from "@/components/jobs/job-status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -29,6 +34,7 @@ import { isStaffRole, requireSession } from "@/lib/auth";
 import { getClientDetail } from "@/lib/data/clients";
 import { formatIST } from "@/lib/date";
 import { clientInitials, telHref, whatsAppHref } from "@/lib/domain/client";
+import { loanRepaidTotal } from "@/lib/domain/client-loan";
 import { formatINR } from "@/lib/money";
 import { canDeleteRecords } from "@/lib/roles";
 import { cn } from "@/lib/utils";
@@ -116,6 +122,28 @@ export default async function ClientDetailPage({
   const canDelete =
     isStaffRole(session.profile.role) && canDeleteRecords(session.profile.role);
   const dueLabel = balance.due < 0 ? "Advance" : "Due";
+  const repayments = payments
+    .filter((payment) => payment.loan_id != null)
+    .map((payment) => ({
+      loanId: payment.loan_id as number,
+      amount: payment.amount,
+      discount: payment.discount ?? 0,
+    }));
+  const activeLoanBalance = loans
+    .filter((loan) => loan.status === 1)
+    .reduce(
+      (sum, loan) =>
+        sum +
+        Math.max(0, loan.total_payable - loanRepaidTotal(loan.id, repayments)),
+      0,
+    );
+  const netDue =
+    Math.round(
+      (balance.due +
+        (finance?.active_loan_given ?? 0) -
+        (finance?.loan_repaid ?? 0)) *
+        100,
+    ) / 100;
 
   return (
     <div className="mx-auto max-w-7xl space-y-5">
@@ -197,6 +225,45 @@ export default async function ClientDetailPage({
           </div>
         </CardContent>
       </Card>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <Button asChild size="sm">
+          <Link href={`/clients/${client.id}/payments/new`}>
+            <Wallet className="size-4" aria-hidden />
+            Add payment
+          </Link>
+        </Button>
+        <Button asChild size="sm" variant="outline">
+          <Link href={`/clients/${client.id}/loans/new`}>
+            <Landmark className="size-4" aria-hidden />
+            Give loan
+          </Link>
+        </Button>
+        <Button asChild size="sm" variant="outline">
+          <Link href={`/clients/${client.id}/ledger`}>
+            <FileText className="size-4" aria-hidden />
+            Ledger
+          </Link>
+        </Button>
+        <Button asChild size="sm" variant="outline">
+          <Link href={`/clients/${client.id}/due-date`}>
+            <CalendarClock className="size-4" aria-hidden />
+            Due date
+          </Link>
+        </Button>
+        <Button asChild size="sm" variant="outline">
+          <Link href={`/jobs/new?client_id=${client.id}`}>
+            <Wrench className="size-4" aria-hidden />
+            New job
+          </Link>
+        </Button>
+        <Button asChild size="sm" variant="outline">
+          <Link href={`/sales/new?client_id=${client.id}`}>
+            <ShoppingCart className="size-4" aria-hidden />
+            New sale
+          </Link>
+        </Button>
+      </div>
 
       {client.payment_due_date && balance.due > 0 ? (
         <div className="border-warning/30 bg-warning/10 rounded-lg border px-4 py-3 text-sm">
@@ -320,9 +387,25 @@ export default async function ClientDetailPage({
           </Card>
 
           <Card className="gap-4 py-5">
-            <CardHeader className="px-5">
-              <CardDescription>Ledger</CardDescription>
-              <CardTitle className="mt-1 text-lg">Payments</CardTitle>
+            <CardHeader className="flex-row items-start justify-between gap-2 px-5">
+              <div>
+                <CardDescription>Ledger</CardDescription>
+                <CardTitle className="mt-1 text-lg">Payments</CardTitle>
+              </div>
+              <div className="flex items-center gap-1">
+                <Button asChild variant="ghost" size="sm">
+                  <Link href={`/clients/payments?client=${client.id}`}>
+                    All
+                    <ArrowUpRight className="size-4" aria-hidden />
+                  </Link>
+                </Button>
+                <Button asChild variant="ghost" size="sm">
+                  <Link href={`/clients/${client.id}/payments/new`}>
+                    <Plus className="size-4" aria-hidden />
+                    Add
+                  </Link>
+                </Button>
+              </div>
             </CardHeader>
             <CardContent className="px-0">
               {payments.length === 0 ? (
@@ -339,6 +422,9 @@ export default async function ClientDetailPage({
                         </th>
                         <th className="px-5 py-2 text-right font-medium">
                           Amount
+                        </th>
+                        <th className="w-10 px-3 py-2">
+                          <span className="sr-only">Edit</span>
                         </th>
                       </tr>
                     </thead>
@@ -365,6 +451,9 @@ export default async function ClientDetailPage({
                             </td>
                             <td className="text-muted-foreground hidden px-3 py-2.5 text-xs sm:table-cell">
                               {payment.payment_type ?? "Full"}
+                              {payment.loan_id
+                                ? ` · Loan #${payment.loan_id}`
+                                : ""}
                             </td>
                             <td className="px-5 py-2.5 text-right">
                               <p className="font-medium tabular-nums">
@@ -380,6 +469,15 @@ export default async function ClientDetailPage({
                                   })}
                                 </p>
                               ) : null}
+                            </td>
+                            <td className="px-3 py-2.5">
+                              <Link
+                                href={`/clients/${client.id}/payments/${payment.id}/edit`}
+                                aria-label={`Edit payment ${payment.id}`}
+                                className="text-muted-foreground hover:bg-muted hover:text-foreground grid size-8 place-items-center rounded-md"
+                              >
+                                <Pencil className="size-3.5" aria-hidden />
+                              </Link>
                             </td>
                           </tr>
                         );
@@ -435,9 +533,17 @@ export default async function ClientDetailPage({
 
         <div className="min-w-0 space-y-4">
           <Card className="gap-4 py-5">
-            <CardHeader className="px-5">
-              <CardDescription>Reach out</CardDescription>
-              <CardTitle className="mt-1 text-lg">Contacts</CardTitle>
+            <CardHeader className="flex-row items-start justify-between gap-2 px-5">
+              <div>
+                <CardDescription>Reach out</CardDescription>
+                <CardTitle className="mt-1 text-lg">Contacts</CardTitle>
+              </div>
+              <Button asChild variant="ghost" size="sm">
+                <Link href={`/clients/${client.id}/edit`}>
+                  Manage
+                  <ArrowUpRight className="size-4" aria-hidden />
+                </Link>
+              </Button>
             </CardHeader>
             <CardContent className="space-y-2 px-5">
               {contacts.length === 0 ? (
@@ -514,25 +620,52 @@ export default async function ClientDetailPage({
                   </span>
                 </div>
               ))}
-              <div className="mt-2 flex items-center justify-between gap-3 border-t pt-2">
-                <span className="font-medium">Balance</span>
-                <span
-                  className={cn(
-                    "font-semibold tabular-nums",
-                    balance.due > 0 && "text-destructive",
-                    balance.due < 0 && "text-success",
-                  )}
-                >
-                  {formatINR(balance.due, { maximumFractionDigits: 0 })}
-                </span>
+              <div className="mt-2 space-y-1.5 border-t pt-2">
+                {[
+                  { label: "Service due", value: balance.due },
+                  { label: "Loan outstanding", value: activeLoanBalance },
+                  { label: "Net position", value: netDue },
+                ].map((row) => (
+                  <div
+                    key={row.label}
+                    className="flex items-center justify-between gap-3"
+                  >
+                    <span className="font-medium">{row.label}</span>
+                    <span
+                      className={cn(
+                        "font-semibold tabular-nums",
+                        row.value > 0 && "text-destructive",
+                        row.value < 0 && "text-success",
+                      )}
+                    >
+                      {formatINR(row.value, { maximumFractionDigits: 0 })}
+                    </span>
+                  </div>
+                ))}
               </div>
             </CardContent>
           </Card>
 
           <Card className="gap-4 py-5">
-            <CardHeader className="px-5">
-              <CardDescription>Financing</CardDescription>
-              <CardTitle className="mt-1 text-lg">Loans</CardTitle>
+            <CardHeader className="flex-row items-start justify-between gap-2 px-5">
+              <div>
+                <CardDescription>Financing</CardDescription>
+                <CardTitle className="mt-1 text-lg">Loans</CardTitle>
+              </div>
+              <div className="flex items-center gap-1">
+                <Button asChild variant="ghost" size="sm">
+                  <Link href="/clients/loans">
+                    All
+                    <ArrowUpRight className="size-4" aria-hidden />
+                  </Link>
+                </Button>
+                <Button asChild variant="ghost" size="sm">
+                  <Link href={`/clients/${client.id}/loans/new`}>
+                    <Plus className="size-4" aria-hidden />
+                    Give
+                  </Link>
+                </Button>
+              </div>
             </CardHeader>
             <CardContent className="px-5">
               {loans.length === 0 ? (
@@ -541,37 +674,73 @@ export default async function ClientDetailPage({
                 </p>
               ) : (
                 <ul className="space-y-2">
-                  {loans.map((loan) => (
-                    <li
-                      key={loan.id}
-                      className="rounded-lg border px-3 py-2.5 text-sm"
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="font-medium tabular-nums">
-                          {formatINR(loan.principal_amount, {
+                  {loans.map((loan) => {
+                    const repaid = loanRepaidTotal(loan.id, repayments);
+                    const remaining = Math.max(0, loan.total_payable - repaid);
+                    return (
+                      <li
+                        key={loan.id}
+                        className="rounded-lg border px-3 py-2.5 text-sm"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-medium tabular-nums">
+                            Loan #{loan.id} ·{" "}
+                            {formatINR(loan.principal_amount, {
+                              maximumFractionDigits: 0,
+                            })}
+                          </span>
+                          <Badge
+                            variant={
+                              loan.status === 1 ? "success" : "secondary"
+                            }
+                          >
+                            {loan.status === 1 ? "Active" : "Closed"}
+                          </Badge>
+                        </div>
+                        <p className="text-muted-foreground mt-1 text-xs">
+                          {fmtDate(loan.loan_date)} · EMI{" "}
+                          {formatINR(loan.emi_amount, {
+                            maximumFractionDigits: 0,
+                          })}{" "}
+                          × {loan.loan_period} · Total{" "}
+                          {formatINR(loan.total_payable, {
                             maximumFractionDigits: 0,
                           })}
-                        </span>
-                        <Badge
-                          variant={loan.status === 1 ? "success" : "secondary"}
-                        >
-                          {loan.status === 1 ? "Active" : "Closed"}
-                        </Badge>
-                      </div>
-                      <p className="text-muted-foreground mt-1 text-xs">
-                        {fmtDate(loan.loan_date)} · EMI{" "}
-                        {formatINR(loan.emi_amount, {
-                          maximumFractionDigits: 0,
-                        })}{" "}
-                        × {loan.loan_period}
-                      </p>
-                      {loan.remarks ? (
-                        <p className="text-muted-foreground mt-1 truncate text-xs">
-                          {loan.remarks}
                         </p>
-                      ) : null}
-                    </li>
-                  ))}
+                        <p className="text-muted-foreground mt-0.5 text-xs">
+                          Repaid{" "}
+                          {formatINR(repaid, { maximumFractionDigits: 0 })} ·
+                          Balance{" "}
+                          <span className="text-foreground font-medium">
+                            {formatINR(remaining, {
+                              maximumFractionDigits: 0,
+                            })}
+                          </span>
+                        </p>
+                        {loan.remarks ? (
+                          <p className="text-muted-foreground mt-1 truncate text-xs">
+                            {loan.remarks}
+                          </p>
+                        ) : null}
+                        <div className="mt-2 flex flex-wrap items-center gap-1 border-t pt-1">
+                          <Button asChild variant="ghost" size="sm">
+                            <Link
+                              href={`/clients/${client.id}/loans/${loan.id}/emi`}
+                            >
+                              <HandCoins className="size-3.5" aria-hidden />
+                              Collect EMI
+                            </Link>
+                          </Button>
+                          <LoanActions
+                            clientId={client.id}
+                            loanId={loan.id}
+                            status={loan.status}
+                            canDelete={canDelete}
+                          />
+                        </div>
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </CardContent>

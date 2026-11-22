@@ -1,12 +1,17 @@
 "use client";
 
 import Link from "next/link";
-import { useActionState } from "react";
+import { useActionState, useState, useTransition } from "react";
 
 import {
+  checkClientDuplicates,
   saveClientAction,
   type ClientFormState,
 } from "@/app/(app)/clients/actions";
+import {
+  ContactEditor,
+  type ContactDraft,
+} from "@/components/clients/contact-editor";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -19,6 +24,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import type { DuplicateClient } from "@/lib/data/client-contacts";
 
 export type ClientFormValues = {
   id?: number;
@@ -31,6 +37,7 @@ export type ClientFormValues = {
   openingBalance: number;
   paymentDueDate: string;
   paymentDueRemarks: string;
+  contacts?: ContactDraft[];
 };
 
 const initialState: ClientFormState = { error: null };
@@ -40,9 +47,26 @@ export function ClientForm({ initial }: { initial?: ClientFormValues }) {
     saveClientAction,
     initialState,
   );
+  const [contact, setContact] = useState(initial?.contact ?? "");
+  const [email, setEmail] = useState(initial?.email ?? "");
+  const [duplicates, setDuplicates] = useState<DuplicateClient[]>([]);
+  const [duplicateError, setDuplicateError] = useState<string | null>(null);
+  const [checking, startCheck] = useTransition();
 
   const editing = Boolean(initial?.id);
   const cancelHref = editing ? `/clients/${initial?.id}` : "/clients";
+
+  function runDuplicateCheck() {
+    startCheck(async () => {
+      const result = await checkClientDuplicates({
+        contact,
+        email,
+        excludeId: initial?.id,
+      });
+      setDuplicates(result.duplicates);
+      setDuplicateError(result.error);
+    });
+  }
 
   return (
     <form action={formAction} className="space-y-4">
@@ -102,7 +126,8 @@ export function ClientForm({ initial }: { initial?: ClientFormValues }) {
               required
               maxLength={100}
               inputMode="tel"
-              defaultValue={initial?.contact ?? ""}
+              value={contact}
+              onChange={(event) => setContact(event.target.value)}
               autoComplete="tel"
               placeholder="98765 43210"
             />
@@ -114,7 +139,8 @@ export function ClientForm({ initial }: { initial?: ClientFormValues }) {
               name="email"
               type="email"
               maxLength={120}
-              defaultValue={initial?.email ?? ""}
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
               autoComplete="email"
             />
           </div>
@@ -140,6 +166,9 @@ export function ClientForm({ initial }: { initial?: ClientFormValues }) {
               autoComplete="street-address"
             />
           </div>
+
+          <ContactEditor initialContacts={initial?.contacts ?? []} />
+
           <div className="grid gap-2">
             <Label htmlFor="payment_due_date">Payment due date</Label>
             <Input
@@ -159,6 +188,53 @@ export function ClientForm({ initial }: { initial?: ClientFormValues }) {
               defaultValue={initial?.paymentDueRemarks ?? ""}
               placeholder="Koi note (optional)"
             />
+          </div>
+
+          <div className="grid gap-2 sm:col-span-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={runDuplicateCheck}
+                disabled={checking || (!contact && !email)}
+              >
+                {checking ? "Checking…" : "Check duplicates"}
+              </Button>
+              <span className="text-muted-foreground text-xs">
+                Same phone ya email wala client pehle se hai kya?
+              </span>
+            </div>
+            {duplicateError ? (
+              <p role="alert" className="text-destructive text-xs">
+                {duplicateError}
+              </p>
+            ) : null}
+            {duplicates.length ? (
+              <div className="border-warning/40 bg-warning/10 rounded-md border px-3 py-2 text-xs">
+                <p className="font-medium">
+                  {duplicates.length} matching client
+                  {duplicates.length === 1 ? "" : "s"} mila:
+                </p>
+                <ul className="mt-1 space-y-1">
+                  {duplicates.map((duplicate) => (
+                    <li key={duplicate.id}>
+                      <Link
+                        href={`/clients/${duplicate.id}`}
+                        className="font-medium hover:underline"
+                      >
+                        {duplicate.firstname} {duplicate.lastname}
+                      </Link>
+                      <span className="text-muted-foreground">
+                        {" "}
+                        · {duplicate.contact}
+                        {duplicate.email ? ` · ${duplicate.email}` : ""}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
           </div>
         </CardContent>
         <CardFooter className="flex-wrap gap-2 px-5">

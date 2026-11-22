@@ -1,7 +1,15 @@
-import { Building2, Clock, Database, ShieldCheck, Users } from "lucide-react";
+import {
+  Building2,
+  Clock,
+  Database,
+  ShieldCheck,
+  Users,
+  Wrench,
+} from "lucide-react";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
+import { ServiceCenterPanel } from "@/components/settings/service-center-panel";
 import { SettingsForm } from "@/components/settings/settings-form";
 import { TeamPanel } from "@/components/settings/team-panel";
 import { Badge } from "@/components/ui/badge";
@@ -14,6 +22,7 @@ import {
 } from "@/components/ui/card";
 import { requireSession } from "@/lib/auth";
 import { getMechanicOptions } from "@/lib/data/jobs";
+import { getServiceCenterConfig } from "@/lib/data/service-center";
 import { getSettings, getSystemInfo } from "@/lib/data/settings";
 import { resolveMediaUrl } from "@/lib/data/storage";
 import { listMechanicLinks, listTeamMembers } from "@/lib/data/team";
@@ -27,6 +36,7 @@ const TABS = [
   { id: "profile", label: "Business profile", icon: Building2 },
   { id: "attendance", label: "Attendance & geofence", icon: Clock },
   { id: "team", label: "Team & users", icon: Users },
+  { id: "service-center", label: "Service Center", icon: Wrench },
   { id: "system", label: "System info", icon: Database },
 ] as const;
 
@@ -41,23 +51,33 @@ export default async function SettingsPage({
   const params = await searchParams;
   const tabParam = typeof params.tab === "string" ? params.tab : "";
   const tab: SettingsTab =
-    tabParam === "attendance" || tabParam === "team" || tabParam === "system"
+    tabParam === "attendance" ||
+    tabParam === "team" ||
+    tabParam === "service-center" ||
+    tabParam === "system"
       ? tabParam
       : "profile";
   const canEdit = canManageSettings(session.profile.role);
   const canWriteTab =
     tab === "team" ? canManageTeam(session.profile.role) : canEdit;
 
-  const [settings, systemInfo, teamMembers, mechanics, mechanicLinks] =
-    await Promise.all([
-      tab === "system" || tab === "team"
-        ? Promise.resolve<Record<string, string>>({})
-        : getSettings(),
-      tab === "system" ? getSystemInfo() : Promise.resolve(null),
-      tab === "team" ? listTeamMembers() : Promise.resolve([]),
-      tab === "team" ? getMechanicOptions() : Promise.resolve([]),
-      tab === "team" ? listMechanicLinks() : Promise.resolve([]),
-    ]);
+  const [
+    settings,
+    systemInfo,
+    teamMembers,
+    mechanics,
+    mechanicLinks,
+    scConfig,
+  ] = await Promise.all([
+    tab === "system" || tab === "team" || tab === "service-center"
+      ? Promise.resolve<Record<string, string>>({})
+      : getSettings(),
+    tab === "system" ? getSystemInfo() : Promise.resolve(null),
+    tab === "team" ? listTeamMembers() : Promise.resolve([]),
+    tab === "team" ? getMechanicOptions() : Promise.resolve([]),
+    tab === "team" ? listMechanicLinks() : Promise.resolve([]),
+    tab === "service-center" ? getServiceCenterConfig() : Promise.resolve(null),
+  ]);
 
   const supabaseUrl = getPublicEnv().url;
   const logoUrl = resolveMediaUrl(settings.logo, supabaseUrl);
@@ -103,7 +123,16 @@ export default async function SettingsPage({
         </Badge>
       </div>
 
-      {tab === "system" ? (
+      {tab === "service-center" ? (
+        scConfig ? (
+          <ServiceCenterPanel
+            mode={scConfig.mode}
+            brands={scConfig.brands}
+            serviceTypes={scConfig.serviceTypes}
+            canEdit={canEdit}
+          />
+        ) : null
+      ) : tab === "system" ? (
         systemInfo ? (
           <div className="space-y-4">
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">

@@ -1,0 +1,307 @@
+# Staff Geofence View-Only + Temporary Outside-Work Permit — Plan
+
+Created: 2026-08-31
+Status: **✅ COMMITTED + PUSHED 2026-09-26 — user ne staff + permit se bahar field-test kiya: sab OK.**
+Phase-0 decisions (user, 2026-09-26): **D1 = Tier A soft · D2 = fail-closed · D4 = field work hota hai (permit ON)** · radius = existing config (`geofence_radius_m`, default 200m).
+Scope: Staff ke liye office-based write-gating (view-only jab bahar), plus kisi specific
+staff ko timer ke saath geofence ke bahar kaam karne ki temporary permission.
+
+---
+
+## 1. Goal
+
+- **Staff (`role === 'staff'`)** ko system me changes sirf **office ke andar** se hi karne diye jayein.
+- Jab staff **office ke bahar** ho → poora app uske liye **view-only** ban jaye (wo sirf dekh sakta
+  hai, koi bhi add/edit/delete/push nahi kar sakta).
+- Admin/developer hamesha fully editable rahein (kabhi lock na hon).
+- Naya feature: kabhi jarurat padne par, admin kisi **specific staff** ko **temporary (timer-based)**
+  permission de sake taaki wo thode waqt ke liye geofence ke bahar bhi changes kar sake.
+
+---
+
+## 2. Existing Building Blocks (already in codebase — reuse)
+
+| Cheez | File | Kya karta hai |
+|---|---|---|
+| Haversine distance | `src/lib/geofence.ts` `distanceMeters()` | do lat/lng ke beech meters me doori |
+| Get current position | `src/lib/geofence.ts` `getCurrentPosition()` | `navigator.geolocation` promise wrapper |
+| Geofence config load | `src/lib/geofence.ts` `loadGeofenceConfig()` | `system_info` se config padhta hai |
+| Verify location | `src/lib/geofence.ts` `verifyAttendanceLocation()` | office ke andar/bahar check + Hindi errors |
+| Hindi error msgs | `src/lib/geofence.ts` `geoErrorMessage()` | permission/outside/timeout messages |
+| Geofence config storage | `system_info` key-value | `geofence_enabled/lat/lng/radius_m` |
+| Geofence Settings UI | `src/app/settings/page.tsx` (~178-257, 1135) | enable toggle, lat/lng, radius, "Use My Current Location" |
+| Attendance geofence | DailyAttendance (check-in/out) | sirf ek jagah write, simple gate |
+| Roles | `profile?.role` | `admin`/`developer`/`staff`/`client` |
+
+**Summary:** Location side almost ready. Asli kaam = "view-only" ko define + enforce karna.
+
+---
+
+## 3. Design Decisions (pehle confirm/decide)
+
+### D1. Enforcement tier (SABSE IMPORTANT)
+- **Tier A — Soft (client-side):** Browser geolocation se `viewOnly` flag + banner + buttons disable.
+  Spoofable (devtools geolocation override), par simple, fast, honest-policy value high.
+  → **Recommended starting point.**
+- **Tier B — Server-enforced:** Har staff write API route par server-side distance check +
+  RLS lock. Major refactor, spoof-proof. → Tabhi jab sach me "change kar hi nahi sakta" chahiye.
+
+### D2. Fail-closed vs fail-open (jab location na mille)
+Jab location unavailable/denied/timeout:
+- **fail-closed:** to wo write kar hi nahi sakta (strict — internet/GPS kharab ya permission deny
+  hone par user phas jata hai).
+- **fail-open:** to wo likh sakta hai (lenient — geofence ka maqsad fail ho jata hai).
+- Real "bahar changes nahi" ke liye **fail-closed** chahiye, saath clear Hindi error message
+  (pehle se hai). Decide: kya mobile data off par office me baithe staff ko bhi block karna theek hai?
+
+### D3. Someone exempt
+- `admin`/`developer` → hamesha write (kabhi lock nahi).
+- `client` → apna portal (already alag flow, geofence se alag).
+- Only `staff` par ye mode lagta hai.
+
+### D4. Business rule ki clarification
+- Geofencing single-shop model ke liye hai. Agar staff legitimately client site/field par kaam
+  karte hain, to strict office-only galat hai — isliye **permit feature (section 5)** zaroori hai.
+
+### D5. View-only = sirf mutations block
+- Staff ko sab kuch **dekhna** allowed rahega (reports, jobs, clients sab).
+- Sirf **.insert/.update/.upsert/.delete** + external side-effects (WhatsApp push, WhatsApp, print)
+  block honge.
+
+---
+
+## 4. Tier A — Soft View-Only Design
+
+### 4.1 View-Only state (client context)
+Ek `ViewOnlyContext` / `useViewOnly()` hook banaye jo:
+- Role + geofence status rakhta hai.
+- `viewOnly` = `role==='staff' && currentLocationOutside()` (with valid override, section 5).
+- Main `RootClient` me ek check: staff ke liye, app load par + `focus`/interval par location verify.
+
+### 4.2 Guard mechanism (central, har form me hathyar na karna)
+Kyuki sirf 2 files aaj role-gated hain aur 41 files write karti hain, har form ko modify karna
+costly hai. Clean approach:
+- **Option 1 (recommended):** Ek `CanWrite` wrapper component / `useWriteGuard()` — jo
+  `viewOnly` par button/controls ko `disabled` + tooltip "View Only — office se hi changes honge"
+  karta hai. Naye forms/important forms isme wrap karo (incremental, safe).
+- **Option 2 (global safety-net):** Ek global click/keyboard interceptor + form `onSubmit` guard
+  jo agar `viewOnly` ho to change ko roke + banner dikhaye. Backup guard, lekin layering ke liye.
+- **Option 3 (full sweep):** Hari ek of 41 write files me explicit check. Sabse adhik reliable par
+  sabse adhik kaam. Jab Tier B jana ho tab yehi base banta hai.
+
+**Recommendation:** Option 1 (primary) + Option 2 (safety-net) pehle. Option 3 sirf important
+forms ya Tier B ke liye.
+
+### 4.3 UI
+- **Banner (`viewOnly === true`):** Top, red/purple — "VIEW ONLY — Aap office ke bahar hain.
+  Changes sirf office andar se. (distance Xm)". Mobile + desktop dono par.
+- **Buttons/inputs:** disable via `CanWrite`, grey-out + tooltip.
+- **Status:** geofence config nahi hai → staff ko batao "geofence configured nahi — admin se
+  Settings me set karwayein" (existing `no-config` message).
+
+### 4.4 Edge cases
+- Multiple tabs / tab background → on `visibilitychange` re-verify.
+- Browser permission first time → prompt, handle `denied` graciously (fail-closed ya banner).
+- Office radius generous (100–300m) due to GPS inaccuracy.
+
+---
+
+## 5. Temporary Outside-Work Permit (naya feature — timer-based)
+
+**Maqsad:** Jab kisi specific staff ko geofence ke bahar kaam karna ho (client site, delivery,
+field work), admin usko **limited time** ke liye write-permission de sake. Timer khatam → phir
+view-only.
+
+### 5.1 Data model
+`system_info` key-value me NAHI (per-user dynamic data hai, periodic cleanup chahiye).
+Naya table:
+```sql
+create table if not exists public.staff_geofence_permit (
+  id            bigint generated always as identity primary key,
+  user_id       uuid not null references auth.users(id) on delete cascade,
+  mechanic_id   int null,                    -- optional: business staff mapping
+  reason        text,                        -- "client visit", "delivery", ...
+  granted_by    uuid references auth.users(id), -- admin jo di
+  granted_at    timestamptz not null default now(),
+  expires_at    timestamptz not null,        -- timer end
+  created_at    timestamptz not null default now()
+);
+create index staff_geofence_permit_user_idx on staff_geofence_permit(user_id);
+create index staff_geofence_permit_expiry_idx on staff_geofence_permit(expires_at);
+```
+- RLS: browser client staff/admin READ allowed; **INSERT/DELETE sirf admin (admin-only policy) ya
+  service-role API**. Staff khud ko permit nahi de sakta.
+- Setup/planning page me is SQL ko apply karne ka note (like existing migrations).
+
+### 5.2 Permit logic (Tier A ke andar)
+`useViewOnly()` me:
+1. `role==='staff'` + location outside current device → check active permit:
+   `SELECT 1 FROM staff_geofence_permit WHERE user_id = me AND expires_at > now()`.
+2. Active permit → `viewOnly = false` + green badge "**Outside-Work Permit active — X min baki**".
+3. Permit nahi / expired → `viewOnly = true`.
+
+### 5.3 Timer
+- `expires_at` DB se hi decide hota hai (authoritative). Client timer bhi dikhata hai (countdown).
+- Bahar kam par jaate hi page focus ho → re-verify permit still valid.
+- Permit expiry → agli verification par view-only.
+
+### 5.4 Admin UI (permit management)
+Admin/developer kisi staff ko permit de:
+- Staff select (from `profiles` role=staff / `mechanic_list`).
+- Duration: preset (30min / 1hr / 2hr / 4hr / 8hr / 1 day) ya custom.
+- Options: "abhi se", ya specific start/end.
+- Reason (optional, audit).
+- Active permits list + "Revoke Now" (delete row → turant view-only).
+- Activity log entry (`logActivity`) — permit grant/revoke.
+
+### 5.5 Security notes
+- Permit **sirf admin/developer** grant/revoke (API/RLS enforce).
+- Permit **expiry check hamesha server-side time** (`now()` in DB) se, client clock par trust NAHI.
+- `expires_at` har request par re-check (ya minimum TTL cache) taaki expired permit hat jaye.
+- Permit ko **better spoof-na ho** ke liye, Tier B me server bhi `expires_at > now()` check karega.
+
+### 5.6 Edge cases
+- Admin khud ko permit deta hai? Zaroorat nahi — admin hamesha write.
+- Ek se zyada active permits — latest `expires_at` max consider karo.
+- Purana expired data cleanup: daily cron / occasional `DELETE ... WHERE expires_at < now() - 30d`.
+
+---
+
+## 6. Tier B — Hard Server-Enforced (future, optional)
+
+Agar kabhi spoof-proof chahiye:
+1. Staff ke tamam write operations ko service-role API routes me normalize karo jo
+   `clientLocation` (har request me bheja coords) ko **server-side** office radius se verify kare.
+2. RLS lock: browser client se direct PATCH/DELETE on core tables sirf tab jab request ke saath
+   verified location ho (complex — RLS me location compare nahi hoti easily). Asli rasta: sab writes
+   API se, RLS browser writes band.
+3. Location snapshot ko signed/attested karna mushkil hai — server ko client-declared coords par
+   trust karna hota hai (client "office coords" bhej sakta hai). Isliye genuinely bulletproof
+   server-side location auth ke liye alag solution chahiye (e.g. VPN/device mgmt) — practical me
+   Tier B "decent but not absolute".
+
+**Honest note:** Browser geolocation kabhi bhi 100% spoof-proof nahi. Tier B bahut zyada strong
+karta hai par absolute guarantee nahi deta. Agar hard requirement ho, to enterprise MDM ya
+dedicated device app level ka solution chahiye (is project me overkill).
+
+---
+
+## 7. Data-collection / write surface sweep
+- **135 mutating call-sites, 41 files** in `src/app` write karte hain.
+- `src/app/**` me mutating methods: `.insert()`, `.update()`, `.upsert()`, `.delete()`.
+- `src/lib/*` me bhi service-role API routes (login, attendance, etc.) — unhe bhi audit karo.
+- External side-effects (WhatsApp push, prints) ko bhi gate karna hai.
+
+---
+
+## 8. Suggested Phases (baad me implement karte waqt)
+
+### Phase 0 — Decisions
+- [x] D1 enforcement tier choose (recommend: Tier A first). → **Tier A soft (user)**
+- [x] D2 fail-closed vs fail-open decide. → **fail-closed (user)**
+- [x] D4 business-rule confirm (single-shop? field work?). → **field work hota hai → permit ON (user)**
+- [x] Radius value confirm. → existing `geofence_radius_m` (default 200m)
+
+### Phase 1 — Permit DB
+- [x] `staff_geofence_permit` table migration + RLS (insert migration file). → `supabase/migrations/20260926_staff_geofence_permit.sql` (SELECT: is_frontend_staff gate; INSERT/DELETE: service-role API only). **✅ Applied 2026-09-26 (user ran in Dashboard — 8/8 cols verified). Post-verify LIVE: table readable (0 rows) · staff JWT read OK · staff self-grant 403-blocked ✅.**
+- [x] Admin UI: grant/revoke + list + timer presets. → `/settings/geofence-permits` (admin/developer guard, presets 30m–1din, missing-table notice).
+- [x] Activity-log entries. → grant/revoke par `logActivity` (module `Staff`).
+
+### Phase 2 — Tier A view-only core
+- [x] `ViewOnlyContext` / `useViewOnly()` (role + location + permit). → `src/lib/viewOnly.tsx` (pure `decideViewOnly` + 7 vitest).
+- [x] `RootClient` load/focus/re-interval verification. → `ViewOnlyProvider` (mount + visibility + focus + 5-min interval, staff-only).
+- [x] `CanWrite` wrapper + `useWriteGuard()`. → capture-phase guard + `display:contents` (layout zero-impact). Wraps: advance save, expenses staff+shop save, payments save (incremental — baaki 47 files future).
+- [x] Banner + button disable + Hindi messages. → `ViewOnlyBanner` (red view-only / green permit countdown / amber no-config).
+- [ ] ESLint rule/helper: naye forms me `CanWrite` use karo. → helper ready (`CanWrite`), lint rule future.
+
+### Phase 2b — CENTRAL WRITE GATE (user decision 2026-09-28, implemented)
+Rule: **office ke bahar, permit ke bina staff SAARE modules dekh sakta hai, par KISI BHI module me kuch change nahi kar sakta. Permit active = har change allowed.** Attendance check-in/out jaaisa hi rakha gaya (koi badlav nahi).
+
+Audit ne dikhaya: `CanWrite` sirf 6 jagah laga tha, jabki `src/app` me **216 mutating call-sites / 81 files** hain (staff sidebar ke 18 modules me ~77 reachable unguated op — clients 24, jobs sub-pages 35, sales 6, attendance 4, inquiries 3, products 2, due-reminders 2, messages 1). DOM-level guarding se har form alag wrap karna padta — brittle.
+
+Isliye **3 central chokepoints** (0 call-site change):
+- [x] `src/lib/writeGuard.ts` (new) — module-level state store (pattern `lib/geoAudit.ts` jaisa), `GeoWriteBlockedError`, chainable `blockedBuilder` (`.insert().select().single()` bhi safe — throw nahi, `{data:null,error}` resolve), narrow `withWriteGuardBypass` (sirf geofence apne audit ke liye — warna "staff bahar gaya" entry hi block ho jati), `installApiWriteGate` (global `window.fetch` patch, 69 raw `/api/` call-sites).
+- [x] `src/lib/supabase.ts` — single browser client ko Proxy se wrap. Blocked: `.insert() .update() .upsert() .delete()`, storage `.upload() .remove() .createSignedUrl() .move() .copy()`. **Hamesha allowed: `.select()` + `auth.*`** (staff bahar dekh sakta hai; login block nahi hona chahiye).
+  - [x] `.rpc()` — **read-prefix allow + default-deny** (`isReadOnlyRpc()`): `get_/peek_/check_/list_/read_/fetch_/search_` allowed; `WRITE_RPCS` explicit deny (`next_job_id` read+increment, `record_stocktake`, `receive_po_receipt`, `reset_sequence`, `activate_license`); **unknown RPC = blocked**. Pehle sirf `["get_public_config","license_status"]` allowlist thi jisse staff ke bahar jaate hi REAL reads bhi toot jaati thi (`get_inventory_stock`, `get_dashboard_stats`, `get_financial_summary`, `get_clients_page_financials`, `get_technician_metrics`, `check_license`, `peek_next_job_id`) — user ka rule "sirf dekhna hai" isko allow karta hai.
+- [x] `src/lib/viewOnly.tsx` — `useMemo` ke andar `setWriteGuardState()` publish karta hai (effect me nahi → ek render-tick ka slip-gap nahi); `installApiWriteGate()` staff ke liye; non-staff par `resetWriteGuardState()`.
+- [x] Server side: `src/lib/api-auth.ts` me `enforceApiGeoGate(req, role, userId)` + `requireStaffWriter(req)` — permit check **server clock** se (`expires_at > <server ISO>`, client clock par trust nahi). **GET par gate NAHI** (reads allowed).
+  - [x] **Fail-closed signal:** `x-vtech-geo-blocked: 0` → allow · `1` → permit table check · **missing/invalid header → 403 `GEO_SIGNAL_MISSING`**. Pehle missing header par `return null` (allow) tha — jisse ek plain `fetch(..., {method:"POST"})` ya curl bina header ke staff writes chala deta tha, yaani gate hi bypass ho jata tha.
+  - [x] Wired staff-reachable mutating routes (16): `api/locations` (POST/PUT/PATCH), `api/locations/assign` (POST), `api/locations/manage` (POST/PUT/PATCH), `api/bom-templates` (POST), `api/bom-templates/[id]` (PUT/DELETE), `api/media/delete` (POST), `api/settings/signature` (POST), `api/messages/push` (POST), `api/client-photo`, `api/job-images`, `api/mechanic-photo`, `api/product-image`, `api/spare-photos`, `api/supplier-photo`, `api/user-avatar` (sab POST upload). Ye photo/avatar/signature routes **service_role** se likhte hain — RLS par depend karna safe nahi tha.
+  - [x] Deliberately **NOT** gated: `api/chat` (POST) — sirf AI call; `lib/gemini-tools.ts` me poora `.select()`-only hai, koi DB write nahi → over-blocking hota. `api/print-*` (GET/print), `api/export-transactions` (GET), `api/locations/options|by-product` (GET) — sab reads.
+- [x] Gates: tsc 0 · eslint 0 errors (4 pre-existing warnings `api/print-purchase-order` me, untouched) · **vitest 193/193 across 15 files** (naye: `writeGuard.test.ts` 16, `supabase.writeGuard.test.ts` 16, `apiWriteGate.test.ts` 9, `api-auth.geoGate.test.ts` 12) · `next build` compiled successfully.
+
+**Known limits (honest):** ye abhi bhi Tier A hai. Server route gate client ke bheje `x-vtech-geo-*` signal par depend karta hai — DevTools se header `0` set karke ya raw Supabase client se RLS tak pahunch kar bypass **ho sakta hai** (sirf missing-header wala aasaan bypass band hua). Geo-audit (`lib/geoAudit.ts`) detective layer hai, preventive ka replacement nahi. Asli hard enforcement ke liye Tier B (server-side location attestation) ya MDM chahiye.
+
+
+### Phase 3 — Permit wiring
+- [x] `useViewOnly()` me permit check (active → write allowed + countdown badge). → DB-time `expires_at > now()` filter + badge.
+- [x] Re-verify on focus/timer; expiry → view-only. → focus/visibility/interval triggers.
+
+### Phase 4 — Test matrix (debugging session me verify karna)
+- [ ] Admin inside/outside → always write.
+- [ ] Staff inside → write.
+- [ ] Staff outside, no permit → view-only + banner.
+- [ ] Staff outside, active permit in duration → write + badge.
+- [ ] Permit expired while outside → view-only (after re-verify).
+- [ ] Location denied/timeout → fail-closed (banner with Hindi reason).
+- [ ] Desktop + mobile, multiple tabs, wifi-off in office.
+
+### Phase 6 — Location audit (map pins + session audit + per-write tagging, implemented uncommitted)
+- [x] Map-link viewer: `DailyAttendance` fetch me `lat_in/lng_in/lat_out/lng_out` + desktop/mobile rows me 📍 pin (Google Maps, no key). `handleTimeChange` coords preserve karta hai (spread fix).
+- [x] Permit-session audit: `ViewOnlyProvider` me transition log (`Geofence Outside` / `Permit Session Active` / `Geofence Inside` / `Geofence Location Unavailable`) — distance snapshot ONLY, precise coords kabhi nahi; 15-min cooldown per action; activity_logs (module `Staff`) me dikhta hai.
+- [x] Per-write geo tagging (user demand 2026-09-26 — "bahar ka har kaam history me location ke saath", implemented uncommitted): `activity_logs` me nullable `geo_lat/geo_lng/geo_distance_m` (migration `20260927_activity_geo_tags.sql` — Dashboard me apply ✅ 2026-09-26, 3/3 cols verified). `logActivity()` signature UNCHANGED — `lib/geoAudit.ts` cache (provider har check par likhta, activity har insert par padhta; 10-min TTL; inside = null = as-is). Columns missing hon to plain-insert fallback (deploy-order safe). History UI (reports/activity + activity-logs, dono `select("*")`) me 📍 GeoPin + details suffix `📍 Bahar ~Xm se (permit par)`. Backup export me 3 cols added. Gates: tsc 0 · eslint 0 errors · vitest 140/140 · build green.
+
+### Phase 7 — Outside-work audit page (user demand 2026-09-26, implemented uncommitted)
+- [x] `/reports/outside-work` (admin/developer only): geo-tagged entries ki poori list — kab, kaun staff (mechanic map, 0=Admin), **clickable Job / Record column** (`recordLink`: Jobs meta_id = canonical PK, `/jobs/[id]/view` PK-resolve verified) + **action text bhi clickable**, kya kaam, module, 📍 pin + ~Xm. Search (staff/kaam/module) + DataTable paging (500 latest, bounded). Reports index me "Bahar Se Hua Kaam" card (Staff & Performance). Sidebar: People submenu me "Bahar Se Hua Kaam" link (admin-gated, matchPaths).
+- [x] Job detail timeline me 📍 pin (user demand — "jobs ki history me dikh jayega"): `jobs/[id]/view` fetch me geo cols + `ActivityEntry` type + timestamp line me GeoPin.
+- [x] Guardrails: disclosure permit badge me ("location audit me save hoti hai") + permits page note + audit page par scope note (office ke kaam kabhi nahi aate).
+- [ ] Debugging: page khaali dikhega jab tak deploy + asli bahar-kaam nahi (purani rows me geo NULL). SQL se 1 test row (fake coords) → render verify → delete.
+- Gates: tsc 0 · eslint 0 · vitest 140/140 · build green (route compiled).
+
+### Phase 5 — Tier B (optional)
+- Server-side verify + browser direct writes band, agar chahiye.
+
+---
+
+## 9. Risks & Mitigations
+
+| Risk | Mitigation |
+|---|---|
+| Client-side spoof (devtools coords override) | Tier B / server verify; ya policy acceptance. |
+| Geolocation permission warnings annoy staff | Clear Hindi msgs; geofence toggle on/off. |
+| Indoor GPS false "outside" | Generous radius (100–300m). |
+| Staff phans jaye (denied/no-GPS) | D2 fail-closed decision + emergency permit from admin. |
+| Permit expiry surprise mid-task | Server-time enforcement + 5min pre-expiry warning + revoke-all. |
+| Scope creep (41 files) | Incremental `CanWrite` wraps; global safety-net guard. |
+| RLS/client writes bypass Tier A | Tier B me API-enforced writes. |
+
+---
+
+## 10. Files likely touched (implementation ke waqt)
+
+- `src/lib/geofence.ts` — extend (permit check helpers).
+- `src/lib/viewOnly.tsx` (new) — `ViewOnlyContext`, `useViewOnly`, `CanWrite`, `useWriteGuard`.
+- `src/app/RootClient.tsx` — mount context provider + banner + load/focus verify.
+- `src/app/components/` — `ViewOnlyBanner`, `CanWrite`.
+- `src/app/api/admin/geofence-permit/route.ts` (new) — grant/revoke/list (service-role, admin-only).
+- `src/app/settings/page.tsx` — (optional) permit management UI ya alag page `/settings/geofence-permits`.
+- `supabase/migrations/YYYYMMDD_staff_geofence_permit.sql` (new).
+- `src/lib/activity.ts` — log permit actions.
+
+---
+
+## 11. NOT-in-scope / de-prioritized
+- Client portal geofencing (alag flow, baad me ek alag plan).
+- Enterprise MDM / dedicated device app (overkill is project ke liye).
+- Multi-office complex rules (pehle single-shop model).
+
+---
+
+## 12. Summary Recommendation
+1. **Tier A soft view-only** pehle — cheap, phir real-world behavior dekho.
+2. **Permit table + timer UI** zaroor banao (yaha ka special demand) — ye practical value deta hai.
+3. **Tier B** ko future/optional rakho; jab tak koi hard breach case na dikhe, over-engineer mat karo.
+4. Tests layered: edge cases (permit expiry, fail-closed, multitab) pehle hi matrix me dalo.
+
+_Note: Ye plan baad me implement hone ke liye hai. Implement se pehle Phase 0 decisions confirm_
+_karna aur DATA_MIGRATION_NOTES.md padhna (DB work rule)._

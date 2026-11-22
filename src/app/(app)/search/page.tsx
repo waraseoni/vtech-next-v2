@@ -126,7 +126,7 @@ export default async function SearchPage({
             <LiveSearchInput
               defaultValue={q}
               autoFocus={!q}
-              placeholder="Client, phone, job code, item ya sale code…"
+              placeholder="Client, phone, job code, item, serial ya sale code…"
               ariaLabel="Search everything"
             />
             <Button type="submit" variant="secondary">

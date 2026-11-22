@@ -66,6 +66,13 @@ export async function saveJobAction(
   const input = {
     clientId: data.clientId,
     mechanicId: data.mechanicId ?? null,
+    brandId: data.brandId ?? null,
+    serviceTypeId: data.serviceTypeId,
+    itemCategory: data.itemCategory ?? null,
+    model: data.model ?? null,
+    serialNo: data.serialNo ?? null,
+    warrantyStatus: data.warrantyStatus ?? null,
+    warrantyClaimNo: data.warrantyClaimNo ?? null,
     item: data.item,
     fault: data.fault,
     remark: data.remark ?? "",

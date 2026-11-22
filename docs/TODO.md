@@ -1,0 +1,678 @@
+# TODO / Work Log
+
+Har kaam ke liye: plan + todo banate hain, jo complete ho jata hai use mark karte hain.
+
+- `[ ]` = pending / `[x]` = complete
+- Commits: `docs/COMMITS.md` (agar bana ho) — warna neeche "Deployed" section.
+- **Saare pending items ek jagah:** `docs/plans/pending_work_2026-11-20.md`
+  (20 Nov 2026 scan — user action, perf/RSC, security, data, features).
+
+---
+
+## Recent work log (2026-11)
+
+- [x] Public GPS map/directions + location share — `ContactInfoContent` ab
+      `latitude`/`longitude` (null default) rakhta hai; `mergeSiteContent` geofence
+      rows (`geofence_lat`/`geofence_lng`) ko range-validate karke read-only expose
+      karta hai (no new DB key/write). Map priority: `map_url` → office GPS → address;
+      naya `buildDirectionsLink` (`/maps/dir/?api=1&destination=<lat,lng>`) footer,
+      mobile sticky bar aur Contact page me. LocalBusiness JSON-LD me
+      `geo` + `hasMap`. Contact Location card me selectable `GPS: lat, lng` + copy;
+      naya `location-share.tsx` modal pehle recipient puchta hai — saved contact
+      (`navigator.share`, fallback WhatsApp chooser) ya typeable number →
+      `wa.me/<number>?text=…` (10-digit auto `91`), plus Copy/Map/Route. Footer
+      "Share location". Settings map_url hint updated. Gates: tsc/eslint/prettier/
+      build + **677 tests / 62 files** + read-only smoke (GPS line, coords hrefs,
+      JSON-LD geo/hasMap, routes 200). **Zero DB writes, no commit/push.**
+
+- [x] Public FAQ + a11y polish (WS-8e/8d slice) — content-driven FAQ home par:
+      `FaqContent` defaults/schema (`cleanFaqItems` cap 10, merge/sanitize,
+      `{faq:null}` reset), 6 safe Q&A (charge, time, warranty, workshop `{address}`
+      token, Job ID tracking, privacy). Naya `faq-section.tsx` — sticky heading +
+      contact card, native `<details name="site-faq">` exclusive accordion, FAQPage
+      JSON-LD. Settings → Website **FAQ tab** (change-only save/reset); save route
+      whitelist + seed payload updated. PublicShell/RootClient skip-link +
+      `main#main-content`. Gates: tsc/eslint/prettier/build + **664 tests** +
+      read-only 12-route smoke + FAQ markup/JSON-LD checks; seed dry-run 15.5 KB.
+      **Zero DB writes, no commit/push.**
+
+- [x] Public site DB content (WS-0…WS-7 + WS-8a/8b/8c) — content ab server-first
+      `system_info` se:
+      `site_content` JSON + firm keys merge (precedence: hardcoded defaults < JSON < firm
+      keys), `unstable_cache` tag `site-content`. Public shell/home/about/contact/login/
+      job-status/QR + 3 service pages content-driven; disabled service → 404; `site.ts`
+      retired. Admin save API `GET/POST /api/settings/site-content` (409 concurrency,
+      whitelist, 200 KB cap, audit, recursive section deep-merge, revalidate). Settings →
+      Website **7 tabs** (Branding/Contact/Home/FAQ/About/Services/SEO+Footer) with caps,
+      reorder, per-section reset. WS-6: DB-driven `generateMetadata` (absolute titles,
+      canonical, OG/Twitter), async sitemap (enabled services + DB `updatedAt`),
+      LocalBusiness + Breadcrumb JSON-LD, dismissible announcement banner; login/job-status
+      noindex. WS-7: `scripts/seed-public-site-content.mjs`
+      (dry-run default, `--apply`/`--force`/`--out`, 14.3 KB payload verified, zero writes).
+      WS-8a: open/closed badge, mobile sticky Call·WhatsApp·Directions bar + desktop FAB,
+      footer legal/map links, city H1 + 75dvh hero + photo-CTA, contact form inline errors + honeypot, naya `/policies` page. WS-8b: `EquipmentExplorer` (chips/search/groups),
+      optional turnaround/price/warranty, desktop Free-estimate CTA. WS-8c: timeline default,
+      next-action/ETA per status, last-updated, skeleton, Job-ID WhatsApp/Call actions.
+      `/policies` ko proxy + RootClient + useAppBoot + useAppTheme allowlists me add kiya.
+      Gates: tsc/eslint/**659 tests**/prettier/build + read-only 10-route smoke +
+      sitemap 7 URLs + policies anchors/JSON-LD/explorer checks.
+      **Zero DB writes, no commit/push.** Plan:
+      `docs/plans/public_site_db_content_plan_nov08_2026.md`.
+      **PENDING:** WS-8d/8e ke optional items (owner photos, Google review link).
+      **USER ACTION:** authenticated admin se Settings → Website save + hard refresh check.
+
+- [x] Staff server-first — remaining 44 staff-accessible routes server-seeded.
+      Waves: A direct-sales+advance (4), B mechanics (4), C products/inventory (8),
+      D reports (19 — incl. delivered/ledger/vyapar-darpan wrappers), E ops
+      (activity-logs/attendance/inquiries/messages/profile), F clients
+      (`add-direct-sale`; `/clients/new` audit-only no-op), G legacy `/jobs/old` +
+      `/jobs/[id]/old`. Default-view-only seeding; non-default filters/URL params
+      client fetch par. Gates: tsc/eslint/589 tests/prettier/schema-drift/build +
+      13-route unauth smoke (307 → `/login`, health 200). Zero DB writes.
+      Plan + notes: `docs/plans/staff_server_first_plan_nov03_2026.md`.
+      **USER ACTION:** authenticated admin se 44 routes ka first paint (no loader
+      flash), non-default filters, aur `/jobs/old` Assign Technician panel check karna.
+- [x] Jobs server-first speed — P0: `/jobs` filter/date/reset/preview URL sync native
+      `history.pushState` (server RSC refetch khatam). P1: `/jobs/[id]/view` server seed
+      (`jobViewQueries.ts` neutral + RSC layout + React Query `initialData`). P2: `/jobs/new` +
+      `/jobs/[id]/edit` master data + available stock server seed (`jobFormQueries.ts`,
+      `server-job-form.ts`), fallback 7 sequential RTT → 1 wave. Stock formula unchanged.
+      Gates: tsc/eslint/584 tests/build + 8-route smoke green. Zero DB writes.
+      Plan: `docs/plans/jobs_server_first_plan_nov02_2026.md`.
+      **USER ACTION:** authenticated admin se filter/preview (no RSC request), view first paint,
+      new/edit dropdown + stock check karna.
+- [x] Clients server-first speed — C-P0: `/clients/[id]/view` server seed
+      (`clientDetailQueries.ts` neutral + `initialData`). C-P1: `/clients/[id]/edit` +
+      add-payment/give-loan/collect-emi seeds (`clientActionQueries.ts`,
+      `server-client-seed.ts`), sequential waves → 1 server wave. C-P2: `/clients/[id]/ledger-print`
+      default (unfiltered) seed; filtered path client-side hi. C-P3: legacy `/clients/[id]`
+      ab `/view` par server redirect. Gates: tsc/eslint/589 tests/prettier/schema-drift/build + 8-route smoke green. Zero DB writes. Plan: `docs/plans/clients_server_first_plan_nov02_2026.md`.
+      **USER ACTION:** authenticated admin se view first paint, action pages ka naam/balance,
+      ledger default view, legacy redirect check karna.
+- [x] Jobs P3 (non-legacy) — `/jobs/bulk` + `/jobs/bulk-edit` masters/next-id,
+      `/jobs/combined-invoice` default client list, `/jobs/spot-labels` spots/refs/linked ids
+      server seed (`jobsAuxQueries.ts`, `JobAuxSeed`, `server-jobs-aux-seed.ts`). QR data URLs
+      mount par client-side (browser origin). Legacy `/jobs/old` + `/jobs/[id]/old`
+      owner-approval tak deferred. Gates: tsc/eslint/589 tests/prettier/build + 5-route smoke
+      green. Zero DB writes. Plan: `docs/plans/clients_server_first_plan_nov02_2026.md` §J-P3.
+- [x] Speed findings implementation (WS-1..WS-4) — WS-1: Sentry ab lazy (`src/lib/sentry-lazy.ts`,
+      `ensureSentry()`), static SDK import `sentry.client.config.ts` + `error.tsx`/`global-error.tsx`
+      se hataya, idle init (`requestIdleCallback`, 1.5s fallback). WS-2: `DeferredMount` (IntersectionObserver
+      `200px` + 2.5s fallback, reserved min-height) — dashboard + clients charts ab in-view par mount,
+      Recharts 311KB chunk first paint se bahar; 3 tests. WS-3: monthly-profit first paint
+      411.4KB → 2.7KB (raw rows modal open par on-demand, year-cached, stale-request guard); balancesheet
+      37.0KB monthly / 111.6KB yearly — 200KB budget ke andar, tab split nahi chahiye. WS-4:
+      boot-gate stage 2/3 `NEXT_PUBLIC_SSR_SHELL` flag ke peeche (default off = current behaviour;
+      on karne par root layout `cookies()` se saare routes dynamic ho jate hain — route-group refactor
+      tak off rakhein). Gates: tsc/eslint/611 tests/prettier/schema-drift/3 production builds +
+      unauth smoke (307 → `/login`, health 200). Zero DB writes (sirf read-only service-role SELECTs).
+      Baseline: `docs/plans/speed_baseline_nov2026.md`; plan + §9 results:
+      `docs/plans/speed_findings_implementation_plan_nov03_2026.md`.
+      **USER ACTION:** authenticated admin par Lighthouse/CDP numbers, aur WS-4 enable karne se pehle
+      verification matrix (expired/revoked/license/idle/stale SW/offline) — dono owner-gated.
+
+## Recent work log (2026-10)
+
+- [x] Editable estimate builder — `/estimates` (client + inventory + custom part/service rows,
+      discount/GST/round-off totals, neutral A4 print, WhatsApp share, localStorage draft) +
+      `POST /api/print-estimate`. Zero DB writes (R1/R2/R3). Gates: tsc/eslint/563 tests/build green.
+      Plan: `docs/plans/estimate_builder_plan_oct31_2026.md`.
+      **USER ACTION:** authenticated admin/developer par desktop/mobile print, draft restore,
+      WhatsApp aur R1/R2/R3 live check karna (details plan §13.1).
+- [x] Balance Sheet "व्यापार चिट्ठा" Phase 1 (screen) — as-on header, 4 KPI (संपत्ति/देनदारी/पूंजी/
+      शुद्ध लाभ), T-format statement (double-rule totals), row → tab drill-down, period filters
+      relabelled, Calculation Summary hataya, tabular-nums + zero `—`. Naya pure helper
+      `src/lib/balance-sheet.ts` + 7 tests. Saath hi poore `src` ka mojibake repair (6 files:
+      report/print routes, gemini-tools, groq — double-encoded Devanagari/₹/—).
+      Gates: tsc/eslint/prettier/570 tests/build green. Plan:
+      `docs/plans/balancesheet_chittha_ux_plan_oct31_2026.md`.
+      **USER ACTION:** authenticated user se `/reports/balancesheet` desktop/mobile, row drill-down,
+      period switch aur print check karna.
+- [x] Balance Sheet "व्यापार चिट्ठा" Phase 2+3 — shared server computation
+      (`src/lib/balance-sheet-data.ts`) ab screen aur print dono ke liye single source; report API
+      thin + `asOn` param (default = period end). Statement me naye rows: नकद/बैंक (अनुमानित,
+      negative → ओवरड्राफ्ट liability) aur क्लाइंट लोन बकाया (active, `outstanding > 0`).
+      Estimated cash `computeCashFlow` se (inflows − outflows, as-on tak). Print route ab asli
+      T-format chittha (cream paper, double-rule totals, detail tables, P&L + previous period,
+      signature lines, escaped HTML). UI: as-on date control, CSV export (BOM), previous-period
+      comparison, mobile accordion + totals in headers, `ClientLedgerModal` dead code removed.
+      Fix: `lender_list.delete_flag` column nahi hai — us query se print 400/500 de sakta tha.
+      Helper tests 7 → 17. Gates: tsc/eslint/changed-file prettier/580 tests/build green.
+      Plan: `docs/plans/balancesheet_chittha_ux_plan_oct31_2026.md`.
+      **USER ACTION:** authenticated user se `/reports/balancesheet` — desktop/mobile statement,
+      as-on date change, row drill-down, क्लाइंट लोन + नकद tabs, CSV download, print chittha
+      (A4) check karna. Zero DB writes; read-only queries.
+- [x] `8718f5e` fix(direct-sales): submit row wrap — narrow screen par buttons frame se bahar kat the the
+- [x] `e32e06f` test(attendance): §9 test clock-independent (19:15-24:00 IST window)
+- [x] `01f38d8` feat(bulk-edit): jobs bulk-edit page par row checkboxes — ticked rows Target Client
+      follow, select-all + counter + pre-save confirm. **USER ACTION:** live save device par test karna
+      baaki (sirf UI verify hua)
+- [x] Zoom + crop 3 rounds + PNG fix — "Image Crop / Edit on Upload" section dekho (neeche)
+- [x] `51ab527`/`7f0aaa5` fix(crop): PNG alpha (sourceMime) — transparent logo crop me black-box nahi
+- Pending user: crop ka baaki device matrix (parts, settings, pre-existing 6, phone edge handles)
+
+---
+
+## Project: New Tech Adoption (Oct 2026)
+
+Plan: `docs/plans/tech_adoption_sprint_plan.md`
+
+- [x] **T0** — bundle baseline (`npm run analyze`) + React Query devtools + Sentry import deprecation fix
+- [x] **T1** — Zod foundations (`parseBody` + schemas + tests)
+- [x] **T2** — Zod pilot on 8 API routes
+- [x] **T3** — React Hook Form pilot (2 forms)
+  - [x] T3.1 — `clients/new` (RHF + zodResolver + 8 schema tests)
+  - [x] T3.2 — `jobs/new` (wizard + Quick Save + quick-add client modal; 417 tests)
+- [x] **T4** - Playwright e2e (setup + 5 smoke tests + real run)
+  - Real run green: **4 passed / 3 skipped** (writes off; 2 write specs + attendance day-cell guard). Fixes: `localhost` baseURL (127.0.0.1 par hydration block), SearchableSelect clear-row, async master-data waits, hydration click-retry, dev-compile timeouts.
+  - ⚠️ 26 Oct ke write-run ne **live DB** me 46 test rows bana diye — audit + cleanup SQL: `docs/DB_CHANGES_E2E_AUDIT_2026-10-26.md`. Aage writes sirf **staging** project par.
+  - Pending: `workflow_dispatch` green (staging secrets) → phir `push: branches: [main]` enable.
+- [x] **T5** — `@google/genai` migration + native BarcodeDetector
+  - T5.1 genai live function-calling verified; T5.2 native engine + html5-qrcode fallback (device matrix pending); T5.3 outdated sweep done
+- [ ] **T6** — backlog (TS7, Vitest 5, RQ completion, realtime lists)
+  - [x] Vitest 5 (+coverage-v8 5) — 417 tests green
+  - [x] realtime lists — stale item, list-polling loops nahi bache
+  - [ ] TS7 — blocked (`typescript-eslint` peer `<6.1`)
+  - [ ] RQ completion / RHF rollout — bada kaam, user decision pending
+
+---
+
+## Project: Staff Messenger v2 (1-on-1 chat)
+
+### Plan
+
+Web-only staff messenger enhancements — auto-deployed via Vercel + Supabase.
+Base messenger already live (`30aae41`). Ye round un requested features add karta hai.
+
+### Todos
+
+#### 1. Base messenger (prev round) — DONE
+
+- [x] Staff messenger page + realtime presence (`30aae41`)
+- [x] TeamOnline sidebar widget + Users-page presence dots/badges (`30aae41`)
+- [x] Message push route (`30aae41`)
+- [x] `?to=` deep link + unread badges per conversation (`30aae41`)
+- [x] Fix empty "no users" bug (bad profile columns) (`8dc9a63`)
+- [x] Fix own-user truncated UUID (skip self presence) (`fcd42c4`)
+- [x] Fix offline/new user chat not opening (`b9b0496`)
+
+#### 2. Messenger v2 features — DONE (code deployed, migration applied)
+
+- [x] 3-state ticks (sent / delivered / seen) via `delivered_at` + `read_at`
+- [x] Typing indicator (realtime broadcast)
+- [x] Media share with client-side compress to ~50–100KB (`src/lib/media.ts`)
+- [x] Public `media` bucket upload (storage path stored in `media_url`)
+- [x] Delete message (+ storage file cleanup)
+- [x] Unread badge on sidebar Messages icon (`RootClient.tsx`)
+- [x] DB migration written: columns, RLS update fix, delete policy, bucket
+- [x] Typecheck + `next build` pass
+- [x] Commit `50df6c0` + push → Vercel auto-deploy
+- [x] User applied migration in Supabase SQL Editor (columns confirmed)
+
+### Pending verification (manual QA)
+
+- [x] Test 3-state ticks live
+- [x] Test typing indicator between two users
+- [x] Test media share + compression on mobile
+- [x] Test delete message
+- [x] Test unread sidebar badge counts/reset
+
+#### 3. Post-v2 bug fixes + polish — DONE
+
+- [x] Fix history not loading (inverted `deleted_at` filter returned only soft-deleted) — commit `6ca81dc`
+- [x] Show user avatar in messenger (list / header / new-chat) — commit `22b2cec`
+- [x] Hide global floating mobile back button on `/messages` (overlapped paperclip) — commit `44db4b3`
+- [x] Fix attach-image-only send (`messages_content_check`: non-empty placeholder content for media-only) — commit `6335f9b`
+- [x] Images manager: show + manage messenger `media` bucket (recursive folders + refs from `messages.media_url`) — commit `3335482`
+- [x] Fix media orphan bug (client storage.remove silently failed under RLS) → server `/api/media/delete` via service_role — commit `f65dad1`
+- [x] Delete-message confirmation (2-step "Confirm?") — commit `9f2d2dc`
+
+### Pending verification (manual QA — v3)
+
+- [x] Confirm message delete now needs 2 clicks (no accidental delete)
+- [x] Confirm deleting a media message removes image from `/images` manager (no orphan)
+- [x] Confirm `/images` shows Messages Media bucket
+
+#### 4. Delete permissions + message supervision tool — DONE
+
+- [x] Delete rights: staff sirf apna send-kiya hua delete kare; admin/developer sab (UI + `/api/media/delete` + RLS)
+- [x] RLS `msg_messages_select`: admin/developer sab messages dekh sakte hain (supervise ke liye) — commit (pending)
+- [x] `fetchPairMessages` helper (kisi bhi do users ki chat fetch)
+- [x] `/messages/supervise` read-only tool (admin/developer: User A ⟷ User B + messages)
+- [x] "Supervise chats" link messages page me (sirf admin/dev ko)
+- [x] Typecheck + build pass
+- [x] **USER ACTION**: RLS SQL run karna (delete-policy + select-policy) — `20260901_messenger_presence.sql` + `20260901_messenger_enhancements.sql` applied (supervise + admin-delete live)
+
+---
+
+## Project: Suppliers Module — Fixes & Features
+
+> Full plan: `docs/plans/suppliers_module_plan.md` — plan status: **COMPLETE**
+> Created: 2026-09-17
+
+### Phase A — Bug fix + Supplier Payment Ledger (HIGH) — COMPLETE (commit `34bb8e0`)
+
+- [x] Fix PO status bug — supplier detail page status map numeric vs text mismatch (`suppliers/[id]/page.tsx` + `status-colors.ts`)
+- [x] **`supplier_payments` table** — amount, payment_mode (cash/upi/bank/cheque/adjustment), reference, payment_date, notes, created_by
+- [x] **Payment entry modal** on supplier detail page — add payment, show total paid / outstanding
+- [x] **Outstanding balance** calculation on supplier detail page (sum PO total − sum payments)
+- [x] **Due column** on supplier list page — outstanding balance per supplier
+- [x] **`/reports/supplier-dues`** report — all suppliers with outstanding, sortable, printable
+- [x] **RLS** — staff insert, admin delete, authenticated read
+- [x] **Full schema** integrate (`final_full_schema_idempotent.sql`)
+- [x] **Typecheck + eslint + tests pass** (migration `20260912_supplier_payments.sql` applied)
+
+### Phase B — Required Parts → PO + GST Fields (MEDIUM) — COMPLETE (commits `45cb463`, `b168495`)
+
+> P1 note: planned `purchase_order_items.job_id` ki jagah `purchase_orders.transaction_id` (header-level) used — grouping per-job, supplier modal me choose hota hai.
+
+- [x] `purchase_orders.transaction_id` — job trace (P1)
+- [x] `job_required_parts.purchase_order_id` nullable FK — link part to its PO
+- [x] Parts-pending report: group → "Create PO" button (`/reports/parts-pending`)
+- [x] Job page: "Waiting parts ka PO banao" batch button (`JobRequiredParts.tsx`)
+- [x] Supplier form: GSTIN, bank_name, bank_account, bank_ifsc, credit_limit, payment_terms, city, state
+- [x] Supplier detail: show GST/bank details in info card
+- [x] Full schema + typecheck + lint + tests (migrations `20260913_required_parts_po_bridge.sql` + `20260913_suppliers_gst_bank.sql` applied)
+
+### Phase C — Reports + Expense Link (MEDIUM) — complete (P4 done)
+
+- [x] `/reports/supplier-purchases` — date range, KPIs, per-supplier product breakdown (commit `1a0ad01`)
+- [x] Add `supplier_id` FK to `expense_list` (nullable) — **P4** (migration `20260919_expense_supplier_link.sql`, folded into full schema)
+- [x] Payment entry (Phase A) optionally auto-creates expense entry — **P4** (toggle in Add Payment modal → "Spare Parts Purchase" ledger entry; `supplier_payment_id` FK for dedup/traceability)
+- [x] Old payments ko backfill karne ke liye payment modal me "Expense entry banao" button — **P4** (dedup via `supplier_payment_id`)
+
+### Phase D — Active Product-Supplier Link (LOW) — complete (P5 done)
+
+- [x] Supplier detail: "Recommended Orders" section — low-stock products linked via `spare_supplier`
+- [x] Quick-add: one-click PO from suggested items (`po_draft` + `po_draft_supplier` → prefilled Create PO modal)
+
+### Completed (this session + earlier suppliers rounds)
+
+- [x] Supplier visiting card upload + lightbox zoom
+- [x] Multiple contacts (label + phone + is_primary) + WhatsApp buttons
+- [x] Search across all phones
+- [x] Supplier photo API route (`/api/supplier-photo`)
+- [x] Shared SupplierFormModal component
+- [x] Supplier list + detail page rewrite
+- [x] Image manager: spare-photos + supplier-photos buckets added to BUCKET_MAP
+- [x] System menu "Images" link for admin
+- [x] Global image zoom overhaul — every image display now supports double-click → fullscreen lightbox
+- [x] ZoomableImage wrapper for server/public pages
+- [x] (public) layout ImageLightbox mount for anonymous visitors
+
+---
+
+## Project: Job Required-Parts / Waiting for Spare Tracking — COMPLETE (M1–M8)
+
+> Full plan: `docs/plans/job_required_parts_waiting_tracking.md` — **COMPLETE (2026-09-15)**
+> Created: 2026-09-05 · Commit `a147034` (M1–M7) + M8 receive-sync (migration `20260915_required_parts_receive_sync.sql`)
+
+- [x] **M1** migration `20260905_job_required_parts.sql` — table + `transaction_products.product_id` nullable (surrogate id PK) + `spare-photos` bucket + RLS (`is_frontend_staff`) + moddatetime. Applied DB (2026-09-06). Folded into full schema.
+- [x] **M2** `src/lib/requiredParts.ts` — CRUD + `fetchWaitingPartsReport()` (derived auto-out) + `fetchOpenPartCounts`
+- [x] **M3** `/api/spare-photos` route — upload/delete (≤200KB, requireStaff, admin client)
+- [x] **M4** `JobRequiredParts` component + embed in job view page + `WaitingPartsBadge` (status<=3 && open)
+- [x] **M5** Custom spare in billing (jobs edit/new) — `product_id: null` rows; printers name-snapshot safe
+- [x] **M6** `/reports/parts-pending` report — KPIs + job groups + search + print + "PO banao" (P1)
+- [x] **M7** Delivered(5)/Cancelled(4)/deleted auto-out (derived) + build pass
+- [x] **M8** PO receive-sync — `receive_po_receipt` linked parts ki qty_received FIFO allocate + status=2 (Arrived). **USER ACTION:** `20260915_required_parts_receive_sync.sql` Supabase SQL Editor me run karo (idempotent)
+
+---
+
+> Client view page par "Done (To Deliver)" card + list par "Done pending" per-client total. Billing (balance) par koi effect nahi — sirf informational.
+
+- [x] View page (`clients/[id]/view`): "Done (To Deliver)" stat card — sum of status=2 jobs
+- [x] List page: per-client "Done pending" line (desktop row + mobile card)
+- [x] `client-due.ts`: `repairDone` field/map + `JOB_STATUS_DONE` (kabhi `netBalance` me nahi)
+- [x] `server-clients.ts`: RPC row + legacy fallback status=2 query
+- [x] RPC `get_clients_page_financials` me `repair_done` aggregate — migration `20260914_clients_page_repair_done.sql` (applied) + full schema fold-in
+- [x] Tests (4 naye) + tsc + eslint + build pass
+
+---
+
+## Project: Image Crop / Edit on Upload
+
+> Full plan + expert advice: `docs/plans/image_crop_edit_plan.md`
+> **Abki latest status doc:** `docs/plans/crop_editor_best_practices_plan.md` — **DONE (2026-10-11)**
+
+### Phase 1 — Core crop + pilot (Visiting card + Product photo) — COMPLETE (commit `00185f0`)
+
+- [x] Add `react-easy-crop` dependency (ab **hataya** — niche 2026-10 dekho)
+- [x] `src/lib/imageCropper.ts` — cropImage(dataUrl, crop, rotation) → File/Blob (canvas)
+- [x] `src/components/ImageCropperModal.tsx` — dark full-screen editor (move, zoom, rotate 90°, aspect toggle, "Use Original" skip button)
+- [x] `src/lib/useImageUpload.ts` — orchestrator hook: pick → crop → compress → CompressedImage
+- [x] Pilot: SupplierFormModal visiting card wired via hook
+- [x] Pilot: ProductFormModal product photo wired via hook
+- [x] Typecheck + eslint + tests
+
+### Phase 2 — Rollout (avatars 1:1) — COMPLETE (commit `4f8fbc7`)
+
+- [x] Profile avatar
+- [x] User avatar (users/[id]/edit)
+- [x] Client photo
+- [x] Mechanic photo
+- [x] Job repair photos (batch — per-photo edit button)
+
+### DROPPED (expert advice, 2026-09-12)
+
+- ~ Phase 3 contrast/brightness/redo — no business value, don't build
+- ~ ~~Crop on Settings logo/cover~~ — **SUPERSEDED 2026-10-09**: settings logo/cover
+  crop ab live hain (`accd46d`); transparency concern ab solved (2026-10-11 PNG
+  alpha fix `7f0aaa5` — `sourceMime` output mime source se)
+
+### 2026-10 rounds — COMPLETE
+
+- [x] **Zoom viewer** (`d58fa52`): Lightbox/ZoomableImage rewrite — wheel/pinch/pan,
+      1–6x, gallery arrows; sab image displays par wired
+- [x] **Upload crop + edit-existing ✂** (`accd46d`): jobs item photos (multi-file),
+      required-parts row+form, settings logo/cover; Lightbox `onEdit` close-first flow
+- [x] **8-handle migration** (`b8a9829`): react-easy-crop (crop resize hi nahi tha)
+      → `react-image-crop@11.1.2` — 4 corner + 4 edge handles, presets row, Reset,
+      Esc=Cancel, size label; contract frozen; touch par edge handles ka library bug
+      `globals.css` §7 se fixed
+- [x] **PNG alpha fix** (`7f0aaa5`): `sourceMime()` — transparent PNG (settings logo)
+      ab crop ke baad bhi alpha preserve; 4 unit tests
+- ✅ **Coverage**: add-time crop = 9/9 upload points; edit-existing ✂ = jobs/parts/
+  settings (products/suppliers/avatars intentionally skipped — form re-pick crop
+  karta hai; real feedback aaye tab add karenge)
+
+---
+
+## Project: Client Multi-Contact (1+ numbers, Call/WhatsApp har number par)
+
+> Ek client ke 1+ mobile numbers — family/relative numbers kaun ka hai stays tracked.
+> Mirror of supplier contacts pattern, par flat (`client_contacts`) — suppliers ke
+> persons+phones ki zarurat nahi (client khud ek person hai).
+
+### Implemented — COMPLETE (committed `f2064c9`, released `v1.21.0`)
+
+- [x] Migration `supabase/migrations/20260921_client_contacts.sql` — table: id, client_id (FK→`client_list` CASCADE), name (rishta), label (Mobile/Office/WhatsApp/Shop/Other), phone, is_primary, date_created/updated. Unique(client_id, lower(trim(phone))), **partial unique index single-primary per client**. RLS staff-gate + grants + touch trigger. Folded into idempotent full schema.
+- [x] `src/lib/clientContacts.ts` — `ClientContact`/`ClientContactInput` types, `CONTACT_LABELS`, `normalizeContacts` (dedup + one-primary self-heal), `fetchClientContacts`, `fetchClientContactsBulk`, `syncClientContacts` (diff-by-phone: update/insert/delete), `telLink`/`smsLink`/`waChatLink`
+- [x] Client form (`clients/new` + `clients/[id]/edit` ManageClientPage): old single "WhatsApp / Contact" input replaced by **Contact Numbers editor** — star=primary, name+label per number, add/remove rows; primary phone auto-writes `client_list.contact` (legacy back-compat); save syncs via `syncClientContacts`
+- [x] Client view page (`clients/[id]/view`): header "+N" extra-count badge; **Contact Numbers card** under quick tiles — har number par Call/WhatsApp/SMS buttons (name/label/star)
+- [x] Client list (`ClientsBody` + `ClientCard`/`ClientTable`): list API ab `client.contacts` attach karta hai (server-side bulk `fetchContacts` in `server-clients.ts`); **WhatsApp modal ab "Send To" phone picker** — multi-contact client ke liye kisi bhi number par bhejo (primary default). Bulk WhatsApp primary hi use karta hai (intentional)
+- [x] Types: `Client.contacts?: ClientContactLite[]` (`clientListHelpers.ts` + `server-clients.ts`); migration nahi laga to graceful degrade (contacts → undefined)
+
+### USER ACTION — apply migration
+
+- [x] `20260921_client_contacts.sql` Supabase SQL Editor me run karo — **VERIFIED live (2026-09-15)**: `client_contacts` REST probe confirmed table present (idempotent; full schema me folded hai)
+
+---
+
+## Project: BOM Checker — Phase 3 (Saved Templates)
+
+> BOM Checker (`/inventory/bom-check`) Phase 1 (core check) + Phase 2 (AI summary)
+> already live. Phase 3 = reusable component lists (bom_checker_plan.md §5 Phase 3).
+
+### Implemented — COMPLETE (Phase 3, committed 2026-09-16)
+
+- [x] Migration `supabase/migrations/20260922_bom_templates.sql` — table (id, name, description, items jsonb, created_by), FK `created_by → profiles.id ON DELETE SET NULL`, name/creator indexes, RLS `rlslock_bom_templates_staff` (is_frontend_staff), touch trigger, grants + sequence grants. Folded into idempotent full schema.
+- [x] `src/app/api/bom-templates/route.ts` — GET list (with items) + POST create; `requireStaffWithRole()` cookie+RLS, no service role; server-side items validation
+- [x] `src/app/api/bom-templates/[id]/route.ts` — GET single + PUT (name/desc/items partial) + DELETE
+- [x] `src/lib/bomTemplates.ts` — `BomTemplateItem`/`BomTemplate` types + `itemsToLines()`
+- [x] `src/app/inventory/bom-check/page.tsx` — "Save as Template" button + modal (name/desc); Saved Templates list (Load → textarea / Edit / Delete); save attaches best-match product_id from catalog; hooks before early-return guard. Phase 1 + 2 untouched.
+- [x] Verified: tsc clean, eslint clean, vitest 103/103 green
+
+### USER ACTION — apply migration
+
+- [x] `20260922_bom_templates.sql` Supabase SQL Editor me run karo (idempotent; full schema me folded hai) — **VERIFIED live 2026-10-11**: REST probe `bom_templates` HTTP 200 (table EXISTS)
+
+---
+
+## Project: Staff Passkey / Biometric Login (WebAuthn)
+
+> Design locked — `docs/plans/passkey_biometric_login_plan.md`. PIN REJECTED (weak).
+> Password = hamesha primary; passkey = optional fast-login (Windows Hello / Touch ID / Face ID /
+> Android fingerprint). Client portal untouched. **Status: Option B (custom WebAuthn) implemented** — native Supabase
+> passkeys blocked (`passkey_disabled`, no dashboard toggle). **Migration APPLIED ✅**
+> (20 Nov 2026, object-level verify — `user_passkeys` + RLS + indexes + trigger).
+> Manual device QA pending. Total ≈ 12–16 h dev + migration apply/QA.
+
+### Phase 1 — Foundations (spike + deps)
+
+- [x] Spike: `supabase.auth.admin.createSession` available? — **NO** in supabase-js 2.112.4; Supabase native passkey backend `passkey_disabled` → **Option B (custom) chosen**, D8 = memory-path fallback
+- [x] `npm i @simplewebauthn/server @simplewebauthn/browser` (^14.0.3 / ^14.0.0)
+- [x] `src/lib/admin-supabase.ts` — `getAdminSupabase()` (already existed; reused)
+- [x] `src/lib/passkeys.ts` — RP config, signed httpOnly challenge cookie (5 min, one-time), base64url, `isCounterAcceptable`
+
+### Phase 2 — Enrollment
+
+- [x] Migration `supabase/migrations/20261018_passkey_login.sql` (user_passkeys + RLS + grants + trigger) — **APPLIED ✅ 20 Nov 2026** (live: 10 cols, 2 policies, 4 indexes, 1 trigger, 1 row)
+- [x] `POST /api/passkey/register-begin` (auth + password re-auth + challenge)
+- [x] `POST /api/passkey/register-finish` (verify + INSERT service-role, dup reject → 409)
+- [x] Device mgmt `src/app/api/passkey/devices/route.ts` — list/rename/delete + admin revoke-all
+
+### Phase 3 — Login flow
+
+- [x] `POST /api/auth/login` mode=`passkey-begin` + `passkey-verify` (email optional / **usernameless**; sign_count guard + throttle + `mintSession()` via generateLink→verifyOtp)
+
+### Phase 4 — UI
+
+- [x] Login page: "Fingerprint se login karein" button + **conditional UI (autofill)** — email field par passkey dikhne par finger se seedha login (staff tab, email optional, error states)
+- [x] /profile → "Devices (Fingerprint Login)" (`src/components/PasskeyDevices.tsx` — sab staff self-enroll kar sakte hain): enroll, list, rename, remove
+
+### Phase 5 — Tests + QA
+
+- [x] Unit: `src/lib/passkeys.test.ts` (13 tests — challenge sign/expiry/tamper, base64url, `isCounterAcceptable`, `resolveRp`)
+- [ ] Manual matrix: Windows Hello / Android fingerprint / iOS Face ID / regression / lost-device / RLS probe — **PENDING device QA**
+- [ ] tsc + eslint + vitest + build green — **PENDING final gate run**
+
+### Phase 6 — Deploy gate (post-season)
+
+- [ ] HTTPS + stable rpID note (domain change = passkeys invalid); release tag + CHANGELOG (migration ✅ done)
+
+---
+
+## Project: Frontend Performance — Loading Speed
+
+> Baseline measured 2026-09-17 (`docs/plans/frontend_performance_plan.md`): sab routes ~1.0–1.2MB JS
+> (shared floor), total static JS ~5.6MB uncompressed; fetch-heavy pages dashboard(35)/jobs(29)/
+> accounting-dashboard(28). Phase A pure frontend + season-safe.
+
+### Phase A — Season-safe quick wins
+
+- [x] W1: `(public)/components/qr-share.tsx` dynamic import fix (public layout se qrcode nikaldo)
+- [x] W2: Boot parallelize + `loading.tsx`/Suspense — LicenseGate/useAppBoot race, sidebar lazy
+- [x] W4: sidebar `router.prefetch()` hover/touch par (Link prefetch verify)
+- [x] W5: public pages static cache headers — `next.config.ts` `headers()` (static assets max-age 1d + SWR; HTML/API untouched, 2026-10-18)
+
+### Phase A2 — Nav/save hang + intermittent-slow quick wins ✅ (2026-10-18)
+
+> User report: _"universal search par click ke baad result page nahi khulta ·
+> forms/jobs save-update par hang · kabhi kabhi sab badhiya chalta hai"_.
+> Plan + full detail: `docs/plans/perf_db_fetch_audit_oct14_2026.md` Phase 6 + Phase 8.
+
+- [x] **`logActivity()` 5s timeout** (`src/lib/activity.ts`) — save hang ka
+      root cause: 3 serial RT (`getCachedUser` → `profiles` → insert) bina timeout
+- [x] **Job save chain parallel** (`jobs/new`) — services+products+bump ab ek
+      `Promise.all`; `logActivity` fire-and-forget (save path se poora hata)
+- [x] **Artificial 1s nav delay hata** — 9 save flows ka `setTimeout(router.replace, 1000)`
+      (clients edit/add-payment/collect-emi/give-loan/add-direct-sale, jobs edit/bulk/bulk-edit/new)
+- [x] **Search result prefetch** — hover/focus par sirf hovered result (`NavbarSearch` + `useNavbarSearch`)
+- [x] **`/api/license/status` throttle** — max 1/min per navigation (force always).
+      Ye har nav par auth RTT + 3 `system_info` reads + kabhi kabhi cross-project
+      `check_license` RPC karta tha → Vercel ki limited concurrency me doosre
+      data-fetch QUEUE hote the ("page khulta hi nahi" wala symptom).
+- [x] **Reload watchdogs relaxed** — layout `__VTECH_BOOTED__` 8s → 15s,
+      `useAppBoot` boot guard 6s → 12s (false-positive auto-reload ruk gaya)
+- [x] **DB indexes (audit Phase 6)** — `supabase/migrations/20261018_perf_indexes.sql`:
+      17 indexes + `pg_trgm` GIN (navbar search ke `ILIKE '%q%'` ke liye).
+      ✅ applied (2026-10-19).
+
+### Phase A3 — Client data cache (audit Phase 3) ✅ COMPLETE (2026-10-19)
+
+- [x] **React Query foundation** — `@tanstack/react-query@5.104.4` + root
+      `Providers` (`src/app/Providers.tsx`, `RootClient` ke bahar — public pages
+      aur boot/license guards ke har branch me). Defaults: `staleTime 30s` ·
+      `gcTime 5m` · `refetchOnWindowFocus false` · `retry 1`
+- [x] **Shared query modules** — `src/lib/queries/{system-info,direct-sale,job-view}.ts`;
+      queryFn module level par taaki search hover prefetch kar sake
+- [x] **`useSystemInfo()`** — firm info 5 min cached (pehle har mount par 1 RT)
+- [x] **`jobs/[id]/view` (-232 LOC) + `direct-sales/[id]/view` (-134 LOC) → `useQuery`**
+      — back/forward par dobara network call nahi; save flows `refetch()` /
+      `removeQueries(directSaleKey)`
+- [x] **Search hover = data prefetch** (`prefetchDetailData` in
+      `useNavbarSearch`) — click par 4-stage waterfall cache-hit + hover/click
+      dedupe
+- [x] **`clients/[id]/view` (-165 LOC) → `useQuery`** — 8-query fan-out ek hi
+      snapshot me; client photo / job status+spot / payment edit-delete jaisi local
+      edits ke baad `invalidateQueries` (warna 30s cache purana dikha deta)
+- [x] **Settings save → invalidate `["system-info"]`** — firm details turant fresh
+- [x] **List/report pages → `useQuery`** (2026-10-19, 4 commits) — har mount-effect
+      offender convert: products · users · services · dashboard (financial + due-stats) ·
+      mechanics/MechanicsBody · messages · client-loans · lenders · inquiries ·
+      reports/{activity,client-payment,daily-done,pending-jobs,delivered/client} ·
+      jobs/{spot-labels,combined-invoice,JobsBody} · suppliers/{SuppliersClient,[id]} ·
+      inventory/{InventoryClient,[id],locations,bom-check,stocktake,purchase-orders} ·
+      backup · attendance/MonthlyReport. 26 files; back/forward + search-click ab
+      staleTime (30s) ke andar cache-hit; har save/delete/mutation site ab `refetch()`
+      (warna cache purana re-hydrate karta). RSC-seeded pages (`SuppliersClient`,
+      `InventoryClient`, `MechanicsBody`) `initialData:` se first-paint bhi zero-RT.
+- [x] **Test renders wrap `QueryClientProvider`** — `MechanicsBody.test.tsx` +
+      `MonthlyReport.test.tsx` (`retry:false`; warna `No QueryClient set` throw).
+
+> **Deliberately NOT converted:** `jobs/useJobList.ts` — RSC-seed gate ka apna
+> regression suite hai (`useJobList.test.tsx`, 5 tests) jo mount-par zero-fetch
+> validate karta hai, aur `JobsBody` isme 6 jagah `setTransactions` se locally
+> mutate karta hai. useQuery me convert karne se ye mechanics badalte + seed
+> tests rewrite hote — incremental value (back-nav cache) modest hai vs risk.
+> `ClientsBody` bhi chhoda — fully RSC-seeded, koi fetch-on-mount effect nahi.
+
+> Audit Phase 4 (post-hydration waterfall → RSC) abhi bhi pending — list pages
+> abhi bhi 3-5 sequential query waves + `PageLoader` lete hain (Phase C W7/W8).
+
+### Phase B — Season-safe data batching
+
+- [x] W3a: dashboard `.from()` clusters parallel (`Promise.all`) + dedupe
+- [x] W3b: jobs page batching — done (Phase 4 P2, `050218b`)
+- [x] W3c: reports/accounting-dashboard batching — **DONE (2026-11-01):** shared `src/lib/accounting-dashboard-data.ts` + server seed; queries 28→21, do waves → ek `Promise.all`; numbers identical, koi DB change nahi; 2 vitest tests (aggregates + as-of loan filter) added.
+- [ ] Har page: tsc + eslint + vitest + visual QA green
+
+### Phase C — Post-season (G3)
+
+> **2026-11-01:** consolidated plan `docs/plans/frontend_speed_plan_nov01_2026.md`
+> (v2 comparison + no-DB speed work). Uska order: Phase 0 measurement/budgets
+> pehle, phir W6 (bundle), phir reports first-paint; boot-gate lift alag gated sprint.
+
+- [x] W9: speed plan Phase 0 — **build-level baseline done (2026-11-01)**: chunks 7.4 MB/208; per-route referenced JS (upper bound) `/jobs` 661 KB, `/dashboard` 598, `/clients` 604, `/reports/balancesheet` 589, `/inventory` 748, `/login` 580. Runtime Lighthouse/CDP measurement pending owner-approved window (authenticated login live DB par presence write kar sakta hai).
+- [x] W6: WS-B first slice — `TeamOnline`, `ShortcutHelpOverlay`, `LicenseGate` dynamic chunks; delta ~-12–13 KB/route (-2%). `optimizePackageImports` no-op (Next 16 auto-optimizes). **WS-G (2026-11-01):** Serwist precache verified (52 KB sw.js, 228 entries, koi HTML/RSC nahi), Sentry replay dead config removed (integration bundle me nahi), error tracking + 10% traces unchanged. SidebarNav extraction **deferred** (desktop+drawer shared, ~10 KB, authed visual QA chahiye).
+- [x] W10: WS-F query/cache hygiene — `system_info` `React.cache` per-request (`server-firm-info.ts`, jobs+clients share), converted reports ek `Promise.all` wave, `select("*")` audit done (baaki detail-fetch/list pages intentional).
+- [ ] W7: RSC migration hot pages — PARTIAL: clients/dashboard/jobs DONE (Phase 4 RSC); balancesheet + cash-flow + monthly-profit + pending-jobs + daily-done **DONE (2026-11-01, server page + initialData, APIs/shared modules unchanged)**; inventory pending (WS-C)
+- [ ] W8: React Query / SWR data layer
+
+### Phase D — Measure-repeat
+
+- [ ] `npm run analyze:output` baseline diff + production URL Lighthouse before/after
+
+---
+
+## Project: Backup/Restore Tooling Fix — Lossless Backups
+
+> Plan: `docs/plans/backup_tooling_fix_plan.md`. Audit (2026-09-17, read-only): page backup 17 live
+> tables MISSING + restore column-strip loss (transaction_products.id, suppliers*, purchase_orders*,
+> transaction_list, expense_list, locations) + restore.mjs dry-run executes SQL. **Code-only; live DB par
+> koi write nahi.** Implementation season-safe (backup = SELECT only).
+
+### Phase 1 — Schema import ✅ (2026-09-17)
+
+- [x] Admin client reuse: `src/lib/admin-supabase.ts` `getAdminSupabase()` already existed
+- [x] `src/app/api/backup/schema/route.ts` (GET, requireAdmin) — OpenAPI → table/col/pk map (+generated merge)
+- [x] Unit test `src/lib/backupSchema.test.ts` 7 tests ✅ + live E2E probe (51/51 tables, PKs exact)
+
+### Phase 2 — Backup page ✅ (2026-09-17)
+
+- [x] TABLE list dynamic (golden 51 ordered list + live-schema auto-append)
+- [x] TABLE_COLUMNS → runtime cols; transaction_products single-PK (id) mode; composite → runtime PK
+- [x] Backup Verify: fetched vs exact count per table; mismatch → `_meta.warnings` + HARD red toast
+- [x] `_meta.version → 3.0`; v2 files compatible (file's own `meta.tables`)
+- [x] Restore dry-run (page): PK presence+unique + unknown-col warning + NOT NULL coverage checks (schema `notNull` se), zero writes — toast FAIL on issues
+  - ✅ USER-CONFIRMED dry-run PASSED: 10,223 rows / 51 tables (v3 file); composite-PK false-positive bug fix included
+
+### Phase 3 — Restore safety ✅ (2026-09-17)
+
+- [x] Dynamic column strip (column-loss kill); `onConflict` explicit (single + composite)
+- [x] Restore-after count verify → HARD fail report + toast on mismatch
+- [x] resetSequences list + 17 naye tables; clear-step `not(pk[0],"is",null)` universal delete-all
+
+### Phase 4 — CLI scripts ✅ (2026-09-17)
+
+- [x] `supabase-restore.mjs --dry-run`: ab kabhi SQL execute nahi (file analysis + read-only `SELECT 1`); JSON guard (dry=parse, real=error+guidance)
+- [x] `force-restore.cjs`: arg/glob filename + LIVE schema columns/PK + `onConflict` + generated strip + confirm (`--yes`)
+- [x] `supabase-dump.mjs` auth/storage exclusion doc note
+
+### Phase 5 — Verify (no live writes) 🔶 user-verified
+
+- [x] schema API probe (live OpenAPI E2E: transaction_products/spare_supplier/user_presence/client_payments/messages/bom_templates) ✅
+- [x] Live "Download Backup" ✅ **USER-CONFIRMED 2026-09-17**: `vtech_backup_2026-09-17T07-02-58.json` — 51/51 tables, counts exact (file==DB rows), net change 0, 0 warnings
+- [x] v3 Diff panel (file vs DB) green — same run ✅
+- [x] tsc + eslint + vitest + build green (2026-09-17) ✅ (1 pre-existing exhaustive-deps warning)
+
+### Phase 6 — Free-tier backup strategy ✅ DONE (2026-09-17)
+
+- [x] RESOLVED (2026-09-17): Free tier par koi platform automatic backup / PITR nahi (Pro/Team/Enterprise hi; PITR ~$100/mo). Decision: hamara apna scheduled JSON backup = free-tier ka daily backup.
+  - `scripts/supabase-json-backup.mjs` (NEW): service-role, 51 tables count-verified, page-compatible v3.0 JSON → `backups/` (gitignored). Live-tested: 10,232 rows / 51 tables, net_amount skip verified.
+  - `/backup` page par chhota UI (2026-09-17): "Server Backup (Scheduled)" card — "Abhi Run Karo" button + recent local backups + **cloud copies** list. API: `GET/POST /api/backup/scheduled` (requireAdmin), logic shared `src/lib/scheduledBackup.ts`. Live-tested via lib: 51/51, 10,232 rows, cloud upload ok.
+  - ☁️ Cloud copy: Supabase Storage `backups` bucket (private, auto-create) — Vercel par bhi persistent. CLI `--storage` flag. Verified live (upload + list).
+  - Converter v5: `public/tools/vtech_mysql_converter.html` — 46 app tables + v3.0, saare naye tables/casts, real data par verified (46 tables/10,175 rows exact).
+  - Schedule: `schtasks /Create /TN "VTech Supabase Backup" /TR "node \"D:\next tech\vtech-next-frontend\scripts\supabase-json-backup.mjs\"" /SC DAILY /ST 02:00 /F`
+  - 📖 Full guide (Hindi/English/Hinglish): `docs/BACKUP_GUIDE.md`.
+- [x] Weekly off-site copy + "risky change se pehle fresh backup" = **ongoing routine** (guide §3 me documented, blocker nahi).
+- [x] Storage buckets: manual/Dashboard export cadence note = ongoing hygiene (guide §8 me documented).
+
+---
+
+## Project: UI/UX Architecture Revamp — Sprint 1
+
+### Plan
+
+Master plan: `docs/plans/ui_ux_architecture_complete_plan.md` (Parts 0–F, 4 sprints).
+Hard constraint: free/OSS only. 🛡️ Protected routes: `jobs/old` + `jobs/[id]/old` KEEP FOREVER
+(toast upgrade OK; never delete/redirect-remove) — see plan §PROTECTED ROUTES.
+User directive: **no commit/push** until told.
+
+### Todos — Sprint 1 (2026-09-23)
+
+#### 1. Single toast system + kill alert() ✅
+
+- [x] `src/lib/toast.ts` (sonner wrapper; error=∞, success=3s, warn=5s, info=4s)
+- [x] `src/lib/requireAdmin.ts` — pure `requireAdmin(userRole, action)`; deleted `useAdminGuard.ts`
+- [x] Migrate ~97 `alert()` → toast (print-route server templates `print-bill`/`print-purchase-order` intentional, kept)
+- [x] Migrate ~25 hand-rolled `const [toast, setToast]` banners → sonner (state + JSX + auto-clear effects removed; 0 left)
+- [x] Protected routes `jobs/old/page.tsx` + `jobs/[id]/old/page.tsx`: state/effect/banner removed, `toast.*` imported — **not deleted**
+- [x] Verify: `npx tsc --noEmit` OK · `npx eslint` 0 errors (2 pre-existing warnings: backup exhaustive-deps, users unused disable)
+
+#### 3. `ui/` kit ✅
+
+- [x] `src/components/ui/StatusBadge.tsx`, `EmptyState.tsx`, `ConfirmDialog.tsx`, `index.ts` barrel (re-exports legacy PageHeader)
+
+#### 4. Mobile input fundamentals ✅
+
+- [x] `globals.css` Sprint 1 block (~L3178): 16px iOS font floor (<1023px), safe-area utilities, `.h-dvh-safe`, keyboard-open FAB hide, coarse-pointer active opacity
+
+#### 5. Shared lib helpers ✅ (naming evolved from plan)
+
+- [x] `src/lib/status-colors.ts` — `STATUS_LABELS`, `STATUS_EXPLANATIONS`, `BADGE_COLORS`, `STATUS_BADGE_COLOR`, `DEL_STATUS`, `getLabel`/`getBadge`/`getStatusStyle` (+ legacy `JOB_STATUS`)
+- [x] `src/lib/whatsapp.ts` — canonical `waLink` (double-91 safe); local dupes removed (suppliers pages)
+- [x] `requireAdmin` migrated in: 7 admin pages (lenders/suppliers/services/client-loans/inventory/locations/products) + MechanicsBody + ClientsBody + `jobs/[id]/view` + attendance/MonthlyReport
+
+#### 2. Semantic tokens migration + `!important` delete ✅ (2026-09-23)
+
+- [x] Foundation: `globals.css` `@theme inline` me semantic color tokens (`--color-app-*` + short aliases → `bg-panel`, `text-muted` jaise Tailwind utilities) + helper classes `.card`/`.muted`/`.text-app`/`.bg-app`/`.bg-panel`
+- [x] Codemod Phase 1a: top patterns hardcoded hex (`bg-[#0d1117]`, `bg-[#161b27]`, `border-[#21293d]`, etc.) + `text-slate-*`/`border-slate-*`/`bg-slate-*` → semantic token classes across **165 pages** (9,288 replacements)
+- [x] Delete dark/light `!important` override blocks (~380 lines removed). Remaining 299 `!important` = glass utilities + mobile CSS + select options (intentional, non-theme)
+- [x] `status-colors.ts` updated (`text-slate-400`→`text-muted` etc.)
+- [x] Verify: `npx tsc --noEmit` OK · ESLint 0 errors · committed `bd6d899`
+
+### Sprint 2 (Week 2)
+
+- [x] #9 Keyboard shortcuts: g-prefix + `?` help + skip-to-content — `src/hooks/useKeyboardShortcuts.ts`, `ShortcutHelpOverlay.tsx`, committed `eaa898e`
+- [x] #10 Image compression on ALL uploads — `compressImage` already integrated in 8 call sites (imageCompression.ts + media.ts); no new work needed
+- [x] #7 Mobile bottom tab bar — committed `960c797`
+- [x] #8 Lightbox kill — removed ImageLightbox from 39 files, committed `e95c2b7`
+- [x] #8 remaining: old redirects (skip protected), ledger/salary merge — **DONE (2026-10-15 verify+cleanup)**: redirects audit pehle se complete (ui_ux plan #8: sirf 2 canonical redirects — `jobs/[id]`, `direct-sales/[id]` — live old links, keep; protected routes par kabhi redirect nahi). Salary merge bhi pehle ho chuka tha (`98df65d`) par **unreachable dead files reh gaye the**: `next.config.ts` `redirects()` (`/salary` + `/salary/:path*`) pehle fire hone se `src/app/salary/page.tsx` (19-ln redirect stub) + `src/app/salary/[id]/ledger/page.tsx` (426-ln purana client page) kabhi render nahi hote the — **delete kar diye** (zero imports, self-links hi the). `.gitignore` stale rules bhi hata diye (salary/backup copy patterns + duplicate `out/`). `/salary/:path*` → `/mechanics/:path*` redirect intact — purane bookmarks/`?month`/`?from&to` seedha canonical pages par.
+
+---
+
+## Open Questions / Notes
+
+- Comments Hinglish me; no emojis in UI.
+- Sanitized: migration must be re-run if any part fails midway (idempotent file).
