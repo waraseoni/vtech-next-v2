@@ -24,6 +24,8 @@ type SearchableSelectProps = {
   className?: string;
   required?: boolean;
   disabled?: boolean;
+  /** Submit the enclosing GET form right after a choice is committed. */
+  submitOnChange?: boolean;
   "aria-label"?: string;
   "aria-describedby"?: string;
 };
@@ -58,6 +60,7 @@ export function SearchableSelect({
   className,
   required,
   disabled,
+  submitOnChange,
   "aria-label": ariaLabel,
   "aria-describedby": describedBy,
 }: SearchableSelectProps) {
@@ -74,6 +77,9 @@ export function SearchableSelect({
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const hiddenRef = useRef<HTMLInputElement>(null);
+  /** Guards against pointer-down + click both committing the same option. */
+  const committedRef = useRef(false);
 
   const selectedValue = isControlled ? value : internalValue;
   const selectedOption = options.find(
@@ -106,6 +112,7 @@ export function SearchableSelect({
   }
 
   function openList() {
+    committedRef.current = false;
     setOpen(true);
     const index = filtered.findIndex(
       (option) => option.value === selectedValue,
@@ -114,12 +121,20 @@ export function SearchableSelect({
   }
 
   function commit(next: string) {
+    committedRef.current = true;
     if (!isControlled) setInternalValue(next);
     onChange?.(next);
     setQuery(
       options.find((option) => option.value === next)?.label ?? selectedLabel,
     );
     setOpen(false);
+    if (submitOnChange) {
+      // React state is async; write the hidden field before submitting so the
+      // GET form carries the freshly chosen value.
+      if (hiddenRef.current) hiddenRef.current.value = next;
+      const form = hiddenRef.current?.form ?? inputRef.current?.form;
+      form?.requestSubmit();
+    }
   }
 
   function handleKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
@@ -169,7 +184,14 @@ export function SearchableSelect({
 
   return (
     <div className="relative min-w-0">
-      {name ? <input type="hidden" name={name} value={selectedValue} /> : null}
+      {name ? (
+        <input
+          ref={hiddenRef}
+          type="hidden"
+          name={name}
+          value={selectedValue}
+        />
+      ) : null}
       <input
         ref={inputRef}
         id={inputId}
@@ -228,10 +250,21 @@ export function SearchableSelect({
                     role="option"
                     aria-selected={isSelected}
                     aria-disabled={option.disabled || undefined}
-                    onPointerDown={(event) => event.preventDefault()}
                     onMouseEnter={() => setActiveIndex(index)}
-                    onClick={() => {
+                    onPointerDown={(event) => {
+                      // Commit on pointer-down so mouse, pen and touch all
+                      // select reliably; preventDefault keeps focus on the
+                      // combobox and avoids blur closing the list first.
+                      event.preventDefault();
                       if (!option.disabled) commit(option.value);
+                    }}
+                    onClick={() => {
+                      // Fallback for environments where pointer events are
+                      // skipped (late hydration, some assistive tech). The
+                      // ref stops a pointer-down commit from firing twice.
+                      if (!committedRef.current && !option.disabled) {
+                        commit(option.value);
+                      }
                     }}
                     className={cn(
                       "flex cursor-pointer items-center justify-between gap-3 rounded-sm px-2.5 py-2 text-sm",

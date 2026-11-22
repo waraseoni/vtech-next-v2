@@ -8,13 +8,14 @@ import {
 import { JobsWorkspace } from "@/components/jobs/jobs-workspace";
 import { QuickCreateJob } from "@/components/jobs/quick-create-job";
 import { ClearDeliveredSpotsButton } from "@/components/jobs/clear-delivered-spots-button";
+import { AutoSubmitCheckbox } from "@/components/ui/auto-submit-checkbox";
+import { AutoSubmitInput } from "@/components/ui/auto-submit-input";
+import { AutoSubmitSelect } from "@/components/ui/auto-submit-select";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { LiveSearchInput } from "@/components/ui/live-search-input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
-import { Select } from "@/components/ui/select";
 import { getSession, isStaffRole } from "@/lib/auth";
 import {
   getClientContact,
@@ -415,6 +416,7 @@ export default async function JobsPage({ searchParams }: PageProps<"/jobs">) {
                 id="jobs-mechanic"
                 name="mechanic"
                 defaultValue={mechanic ? String(mechanic) : ""}
+                submitOnChange
                 placeholder="All"
                 options={[
                   { value: "", label: "All" },
@@ -432,7 +434,7 @@ export default async function JobsPage({ searchParams }: PageProps<"/jobs">) {
               >
                 Brand
               </label>
-              <Select
+              <AutoSubmitSelect
                 id="jobs-brand"
                 name="brand"
                 defaultValue={brand ? String(brand) : ""}
@@ -444,7 +446,7 @@ export default async function JobsPage({ searchParams }: PageProps<"/jobs">) {
                     {item.name}
                   </option>
                 ))}
-              </Select>
+              </AutoSubmitSelect>
             </div>
             <div className="grid gap-1.5">
               <label
@@ -453,7 +455,7 @@ export default async function JobsPage({ searchParams }: PageProps<"/jobs">) {
               >
                 Service type
               </label>
-              <Select
+              <AutoSubmitSelect
                 id="jobs-type"
                 name="type"
                 defaultValue={serviceType ? String(serviceType) : ""}
@@ -464,7 +466,7 @@ export default async function JobsPage({ searchParams }: PageProps<"/jobs">) {
                     {item.name}
                   </option>
                 ))}
-              </Select>
+              </AutoSubmitSelect>
             </div>
             <div className="grid gap-1.5">
               <label
@@ -473,7 +475,7 @@ export default async function JobsPage({ searchParams }: PageProps<"/jobs">) {
               >
                 Spot
               </label>
-              <Select
+              <AutoSubmitSelect
                 id="jobs-spot"
                 name="spot"
                 defaultValue={spot ? String(spot) : ""}
@@ -484,11 +486,10 @@ export default async function JobsPage({ searchParams }: PageProps<"/jobs">) {
                     {item.label} ({item.occupied})
                   </option>
                 ))}
-              </Select>
+              </AutoSubmitSelect>
             </div>
             <label className="text-muted-foreground flex items-center gap-2 pb-2 text-xs">
-              <input
-                type="checkbox"
+              <AutoSubmitCheckbox
                 name="untagged"
                 value="1"
                 defaultChecked={untagged}
@@ -497,8 +498,7 @@ export default async function JobsPage({ searchParams }: PageProps<"/jobs">) {
               Untagged
             </label>
             <label className="text-muted-foreground flex items-center gap-2 pb-2 text-xs">
-              <input
-                type="checkbox"
+              <AutoSubmitCheckbox
                 name="hide_delivered"
                 value="1"
                 defaultChecked={hideDelivered}
@@ -513,7 +513,7 @@ export default async function JobsPage({ searchParams }: PageProps<"/jobs">) {
               >
                 Per page
               </label>
-              <Select
+              <AutoSubmitSelect
                 id="jobs-size"
                 name="size"
                 defaultValue={String(pageSize)}
@@ -523,7 +523,7 @@ export default async function JobsPage({ searchParams }: PageProps<"/jobs">) {
                     {value}
                   </option>
                 ))}
-              </Select>
+              </AutoSubmitSelect>
             </div>
             <div className="grid gap-1.5">
               <label
@@ -532,7 +532,7 @@ export default async function JobsPage({ searchParams }: PageProps<"/jobs">) {
               >
                 From
               </label>
-              <Input
+              <AutoSubmitInput
                 id="jobs-from"
                 type="date"
                 name="from"
@@ -546,7 +546,12 @@ export default async function JobsPage({ searchParams }: PageProps<"/jobs">) {
               >
                 To
               </label>
-              <Input id="jobs-to" type="date" name="to" defaultValue={to} />
+              <AutoSubmitInput
+                id="jobs-to"
+                type="date"
+                name="to"
+                defaultValue={to}
+              />
             </div>
             <div className="flex gap-2">
               <Button type="submit" variant="secondary">
