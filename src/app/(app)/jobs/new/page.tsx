@@ -4,6 +4,7 @@ import Link from "next/link";
 import { JobForm } from "@/components/jobs/job-form";
 import { Button } from "@/components/ui/button";
 import { clientDisplayName } from "@/lib/domain/client";
+import { getJobSpots } from "@/lib/data/job-operations";
 import { getJobFormOptions, peekNextJobId } from "@/lib/data/jobs";
 
 export const metadata = { title: "New job" };
@@ -12,9 +13,10 @@ export default async function NewJobPage({
   searchParams,
 }: PageProps<"/jobs/new">) {
   const params = await searchParams;
-  const [options, nextJobId] = await Promise.all([
+  const [options, nextJobId, spots] = await Promise.all([
     getJobFormOptions(),
     peekNextJobId(),
+    getJobSpots(),
   ]);
 
   const preferred = Number(params.client_id);
@@ -76,6 +78,7 @@ export default async function NewJobPage({
           mode: options.mode,
           defaultServiceTypeId: options.defaultServiceTypeId,
           defaultBrandId: options.defaultBrandId,
+          spots,
         }}
       />
     </div>

@@ -6,6 +6,7 @@ import Link from "next/link";
 import { useActionState, useEffect, useRef, useState } from "react";
 
 import { saveJobAction, type JobFormState } from "@/app/(app)/jobs/actions";
+import { JobSpotField } from "@/components/jobs/job-spot-field";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -20,6 +21,7 @@ import { Label } from "@/components/ui/label";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import type { JobSpot } from "@/lib/data/job-operations";
 import { MAX_CLIENT_PHOTO_BYTES, compressPhoto } from "@/lib/images";
 import {
   composeJobItemLabel,
@@ -99,6 +101,11 @@ export function JobForm({
     mode: ServiceCenterMode;
     defaultServiceTypeId: number | null;
     defaultBrandId: number | null;
+    /** Occupancy-sorted spot picker; falls back to free text if omitted. */
+    spots?: JobSpot[];
+    initialLocationId?: number | null;
+    /** Old/backdated entry route — allow an explicit numeric job id. */
+    allowManualJobId?: boolean;
   };
   initial?: JobFormValues;
   nextJobId?: number;
@@ -285,16 +292,42 @@ export function JobForm({
               ]}
             />
           </div>
-          <div className="grid gap-2">
-            <Label htmlFor="spot">Spot / tag</Label>
-            <Input
-              id="spot"
-              name="spot"
-              maxLength={120}
-              defaultValue={initial?.spot ?? ""}
-              placeholder="e.g. Shop counter / Rack A"
+          {options.spots ? (
+            <JobSpotField
+              spots={options.spots}
+              initialLocationId={options.initialLocationId ?? null}
+              initialSpot={initial?.spot ?? ""}
             />
-          </div>
+          ) : (
+            <div className="grid gap-2">
+              <Label htmlFor="spot">Spot / tag</Label>
+              <Input
+                id="spot"
+                name="spot"
+                maxLength={120}
+                defaultValue={initial?.spot ?? ""}
+                placeholder="e.g. Shop counter / Rack A"
+              />
+            </div>
+          )}
+          {options.allowManualJobId && !editing ? (
+            <div className="grid gap-2 sm:col-span-2">
+              <Label htmlFor="manual_job_id">
+                Purana / backdated job id (optional)
+              </Label>
+              <Input
+                id="manual_job_id"
+                name="manual_job_id"
+                inputMode="numeric"
+                maxLength={20}
+                placeholder="Khaali chhodne par auto id milega"
+              />
+              <p className="text-muted-foreground text-xs">
+                Purane register se migrate karte waqt apna job id number
+                daalein.
+              </p>
+            </div>
+          ) : null}
           <div className="grid gap-2">
             <Label htmlFor="item">Item / device label *</Label>
             <Input

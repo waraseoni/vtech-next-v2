@@ -4,6 +4,7 @@ import { notFound } from "next/navigation";
 
 import { JobForm } from "@/components/jobs/job-form";
 import { Button } from "@/components/ui/button";
+import { getJobSpots } from "@/lib/data/job-operations";
 import { getJobDetail, getJobFormOptions } from "@/lib/data/jobs";
 import { clientDisplayName } from "@/lib/domain/client";
 
@@ -16,9 +17,10 @@ export default async function EditJobPage({
   const jobId = Number(id);
   if (!Number.isSafeInteger(jobId) || jobId <= 0) notFound();
 
-  const [detail, options] = await Promise.all([
+  const [detail, options, spots] = await Promise.all([
     getJobDetail(jobId),
     getJobFormOptions(),
+    getJobSpots(),
   ]);
   if (!detail) notFound();
 
@@ -86,6 +88,8 @@ export default async function EditJobPage({
           mode: options.mode,
           defaultServiceTypeId: options.defaultServiceTypeId,
           defaultBrandId: options.defaultBrandId,
+          spots,
+          initialLocationId: detail.job.location_id,
         }}
       />
     </div>

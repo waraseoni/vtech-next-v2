@@ -109,6 +109,22 @@ export function nowISTTime(): string {
   return `${get("hour")}:${get("minute")}:${get("second")}`;
 }
 
+/** Current IST wall clock in `datetime-local` form ("YYYY-MM-DDTHH:mm"). */
+export function nowISTDateTimeLocal(): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: IST,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date());
+  const part = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((item) => item.type === type)?.value ?? "00";
+  return `${part("year")}-${part("month")}-${part("day")}T${part("hour")}:${part("minute")}`;
+}
+
 /** ISO stamp for a datetime-local value, interpreted as IST wall-clock. */
 export function dtLocalToIST(value: string): string {
   if (!value) return "";

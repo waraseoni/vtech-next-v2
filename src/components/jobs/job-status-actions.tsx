@@ -1,18 +1,20 @@
 "use client";
 
-import { useActionState } from "react";
+import { useRouter } from "next/navigation";
+import { useState, useTransition } from "react";
+import { toast } from "sonner";
 
-import {
-  updateJobStatusAction,
-  type JobActionState,
-} from "@/app/(app)/jobs/actions";
+import { setJobStatusAction } from "@/app/(app)/jobs/actions";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   JOB_STATUS_LABELS,
   JOB_STATUS_TRANSITIONS,
   isJobStatus,
   type JobStatus,
 } from "@/lib/constants/status";
+import { nowISTDateTimeLocal } from "@/lib/date";
 
 const NEXT_LABEL: Partial<Record<JobStatus, string>> = {
   1: "Start work",
@@ -22,7 +24,14 @@ const NEXT_LABEL: Partial<Record<JobStatus, string>> = {
   4: "Cancel job",
 };
 
-const initialState: JobActionState = { error: null };
+const EXPLANATION: Record<JobStatus, string> = {
+  0: "Job pending hai. Abhi koi action nahi.",
+  1: "Repair shuru kar dein.",
+  2: "Repair complete mark karein.",
+  3: "Payment settle ho gaya.",
+  4: "Job cancel kar dein. Ye action final hai.",
+  5: "Job deliver karein. Delivery date/time confirm karein.",
+};
 
 export function JobStatusActions({
   jobId,
@@ -31,10 +40,10 @@ export function JobStatusActions({
   jobId: number;
   status: number;
 }) {
-  const [state, formAction, pending] = useActionState(
-    updateJobStatusAction,
-    initialState,
-  );
+  const router = useRouter();
+  const [target, setTarget] = useState<JobStatus | null>(null);
+  const [deliveryAt, setDeliveryAt] = useState(nowISTDateTimeLocal);
+  const [pending, startTransition] = useTransition();
 
   if (!isJobStatus(status)) return null;
   const targets = JOB_STATUS_TRANSITIONS[status];
@@ -46,30 +55,100 @@ export function JobStatusActions({
     );
   }
 
+  function confirm() {
+    if (target === null) return;
+    const next = target;
+    startTransition(async () => {
+      const result = await setJobStatusAction({
+        id: jobId,
+        status: next,
+        dateCompleted: next === 5 ? deliveryAt : null,
+      });
+      if (result.ok) {
+        toast.success(`Status ${JOB_STATUS_LABELS[next]} ho gaya.`);
+        setTarget(null);
+        router.refresh();
+      } else {
+        toast.error(result.error);
+      }
+    });
+  }
+
   return (
-    <form action={formAction} className="space-y-2">
-      <input type="hidden" name="id" value={jobId} />
-      {state.error ? (
-        <p role="alert" className="text-destructive text-xs">
-          {state.error}
-        </p>
-      ) : null}
+    <>
       <div className="flex flex-wrap gap-2">
-        {targets.map((target) => (
+        {targets.map((next) => (
           <Button
-            key={target}
-            type="submit"
-            name="status"
-            value={target}
+            key={next}
+            type="button"
             size="sm"
-            variant={target === 4 ? "outline" : "default"}
-            disabled={pending}
-            className={target === 4 ? "text-destructive" : undefined}
+            variant={next === 4 ? "outline" : "default"}
+            className={next === 4 ? "text-destructive" : undefined}
+            onClick={() => {
+              setDeliveryAt(nowISTDateTimeLocal());
+              setTarget(next);
+            }}
           >
-            {NEXT_LABEL[target] ?? JOB_STATUS_LABELS[target]}
+            {NEXT_LABEL[next] ?? JOB_STATUS_LABELS[next]}
           </Button>
         ))}
       </div>
-    </form>
+
+      {target !== null ? (
+        <div
+          className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Update job status"
+        >
+          <div className="bg-background w-full max-w-md space-y-4 rounded-lg border p-5 shadow-xl">
+            <div>
+              <p className="text-muted-foreground text-xs">New status</p>
+              <h3 className="mt-1 text-lg font-semibold">
+                {JOB_STATUS_LABELS[target]}
+              </h3>
+              <p className="text-muted-foreground mt-1 text-sm">
+                {EXPLANATION[target]}
+              </p>
+            </div>
+
+            {target === 5 ? (
+              <div className="grid gap-2">
+                <Label htmlFor="delivery-at">Delivery date &amp; time</Label>
+                <Input
+                  id="delivery-at"
+                  type="datetime-local"
+                  value={deliveryAt}
+                  max={nowISTDateTimeLocal()}
+                  onChange={(event) => setDeliveryAt(event.target.value)}
+                />
+                <p className="text-muted-foreground text-xs">
+                  Backdated delivery ho gayi thi to sahi time enter karein.
+                </p>
+              </div>
+            ) : null}
+
+            <div className="flex justify-end gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setTarget(null)}
+                disabled={pending}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                variant={target === 4 ? "destructive" : "default"}
+                onClick={confirm}
+                disabled={pending}
+              >
+                {pending ? "Saving…" : "Update status"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </>
   );
 }

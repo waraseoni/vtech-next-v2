@@ -14,7 +14,8 @@ export type AuditAction =
   | "status"
   | "check-in"
   | "check-out"
-  | "upload";
+  | "upload"
+  | "payment";
 
 export type AuditEntry = {
   module: AuditModule;

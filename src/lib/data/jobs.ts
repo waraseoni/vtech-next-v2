@@ -1,7 +1,7 @@
 import "server-only";
 
-import { assertOk, unwrap, unwrapMaybe } from "@/lib/data/errors";
-import { getClientNames } from "@/lib/data/clients";
+import { assertOk, DataError, unwrap, unwrapMaybe } from "@/lib/data/errors";
+import { getClientNames, getClientSummaries } from "@/lib/data/clients";
 import { getServiceCenterConfig } from "@/lib/data/service-center";
 import { removeMediaImages, uploadMediaImage } from "@/lib/data/storage";
 import { istDayRange, todayIST } from "@/lib/date";
@@ -23,6 +23,8 @@ export type JobFilters = {
   serviceTypeId?: number;
   /** "Untagged (legacy)" bucket — brand_id IS NULL. Default false = All. */
   untaggedOnly?: boolean;
+  hideDelivered?: boolean;
+  spotId?: number;
   from?: string;
   to?: string;
   page?: number;
@@ -35,6 +37,7 @@ export type JobListItem = {
   code: string;
   clientId: number | null;
   clientName: string;
+  clientContact: string;
   item: string;
   brandId: number | null;
   brandName: string | null;
@@ -94,6 +97,8 @@ export type CreateJobInput = JobDeviceFields & {
   products: JobProductLine[];
   commissionAmount?: number | null;
   status?: number;
+  /** Backdated/old entries keep the operator-supplied job id. */
+  manualJobId?: string;
 };
 
 export type UpdateJobInput = Omit<CreateJobInput, "userId">;
@@ -148,6 +153,12 @@ export async function getJobsPage(filters: JobFilters = {}): Promise<JobsPage> {
   if (typeof filters.serviceTypeId === "number") {
     query = query.eq("service_type_id", filters.serviceTypeId);
   }
+  if (filters.hideDelivered) {
+    query = query.neq("status", 5);
+  }
+  if (typeof filters.spotId === "number") {
+    query = query.eq("location_id", filters.spotId);
+  }
   if (filters.from) {
     query = query.gte("date_created", istDayRange(filters.from).start);
   }
@@ -176,14 +187,14 @@ export async function getJobsPage(filters: JobFilters = {}): Promise<JobsPage> {
   const rows = unwrap(result, "jobs.list");
 
   const [
-    clientNames,
+    clientSummaries,
     mechanicNames,
     brandNames,
     serviceTypeNames,
     taggedRes,
     untaggedRes,
   ] = await Promise.all([
-    getClientNames(
+    getClientSummaries(
       rows
         .map((row) => parseLegacyClientId(row.client_name))
         .filter((id): id is number => id !== null),
@@ -216,18 +227,22 @@ export async function getJobsPage(filters: JobFilters = {}): Promise<JobsPage> {
   assertOk(untaggedRes, "jobs.coverageUntagged");
   const tagged = taggedRes.count ?? 0;
   const untagged = untaggedRes.count ?? 0;
+  const clientById = new Map(
+    clientSummaries.map((client) => [client.id, client]),
+  );
 
   return {
     rows: rows.map((row) => {
       const clientId = parseLegacyClientId(row.client_name);
+      const client = clientId ? clientById.get(clientId) : undefined;
       return {
         id: row.id,
         jobId: row.job_id,
         code: row.code,
         clientId,
         clientName:
-          clientNames.get(clientId ?? -1) ??
-          (clientId ? `Client #${clientId}` : "Walk-in"),
+          client?.name ?? (clientId ? `Client #${clientId}` : "Walk-in"),
+        clientContact: client?.contact ?? "",
         item: row.item,
         brandId: row.brand_id,
         brandName: brandNames.get(row.brand_id ?? -1) ?? null,
@@ -324,7 +339,27 @@ export async function peekNextJobId(): Promise<number> {
 
 export async function createJob(input: CreateJobInput) {
   const supabase = await createClient();
-  const jobId = unwrap(await supabase.rpc("next_job_id"), "jobs.nextId");
+  let jobId: number;
+  const manual = input.manualJobId?.trim() ?? "";
+  if (manual) {
+    if (!/^\d+$/.test(manual)) {
+      throw new DataError("jobs.manualId", "Job id sirf number ho sakta hai.");
+    }
+    jobId = Number(manual);
+    const existing = await supabase
+      .from("transaction_list")
+      .select("id", { count: "exact", head: true })
+      .eq("job_id", manual);
+    assertOk(existing, "jobs.manualId");
+    if (existing.count) {
+      throw new DataError(
+        "jobs.manualId",
+        "Ye job id pehle se exist karta hai.",
+      );
+    }
+  } else {
+    jobId = unwrap(await supabase.rpc("next_job_id"), "jobs.nextId");
+  }
   const today = todayIST();
   const codes = await getTodayJobCodes(today);
   const code = await claimUniqueJobCode(today, codes, jobId);
@@ -443,10 +478,16 @@ export async function updateJob(id: number, input: UpdateJobInput) {
   return { id };
 }
 
-export async function updateJobStatus(id: number, status: number) {
+export async function updateJobStatus(
+  id: number,
+  status: number,
+  dateCompleted?: string | null,
+) {
   const supabase = await createClient();
   const completed =
-    status === 2 || status === 5 ? new Date().toISOString() : null;
+    status === 2 || status === 5
+      ? (dateCompleted ?? new Date().toISOString())
+      : null;
 
   const result = await supabase
     .from("transaction_list")
@@ -473,6 +514,172 @@ export async function softDeleteJob(id: number) {
       .single(),
     "jobs.delete",
   );
+}
+
+/** Bulk status change — caller validates every allowed transition first. */
+export async function bulkUpdateJobStatus(
+  ids: number[],
+  status: number,
+  dateCompleted?: string | null,
+) {
+  if (!ids.length) return 0;
+  const supabase = await createClient();
+  const completed =
+    status === 2 || status === 5 ? (dateCompleted ?? null) : null;
+  const result = await supabase
+    .from("transaction_list")
+    .update({
+      status,
+      date_updated: new Date().toISOString(),
+      ...(completed ? { date_completed: completed } : {}),
+    })
+    .in("id", ids)
+    .select("id");
+  assertOk(result, "jobs.bulkStatus");
+  return result.data?.length ?? 0;
+}
+
+/** Bulk spot move — dual write like the single-job picker. */
+export async function bulkMoveJobSpot(
+  ids: number[],
+  locationId: number | null,
+  spot: string,
+) {
+  if (!ids.length) return 0;
+  const supabase = await createClient();
+  const result = await supabase
+    .from("transaction_list")
+    .update({
+      location_id: locationId,
+      uniq_id: locationId ? spot.trim().slice(0, 120) : "",
+      date_updated: new Date().toISOString(),
+    })
+    .in("id", ids)
+    .select("id");
+  assertOk(result, "jobs.bulkSpot");
+  return result.data?.length ?? 0;
+}
+
+/** Header-only edit for bulk-edit — line items and spot are never touched. */
+export async function updateJobHeader(
+  id: number,
+  input: Pick<
+    UpdateJobInput,
+    "clientId" | "mechanicId" | "item" | "fault" | "remark"
+  >,
+) {
+  const supabase = await createClient();
+  return unwrap(
+    await supabase
+      .from("transaction_list")
+      .update({
+        client_name: String(input.clientId),
+        mechanic_id: input.mechanicId,
+        item: input.item.trim().slice(0, 200),
+        fault: input.fault.trim().slice(0, 400),
+        remark: input.remark.trim().slice(0, 400),
+        date_updated: new Date().toISOString(),
+      })
+      .eq("id", id)
+      .select("id")
+      .single(),
+    "jobs.bulkUpdateHeader",
+  );
+}
+
+export type BulkEditableJob = {
+  id: number;
+  jobId: string | null;
+  item: string;
+  fault: string;
+  remark: string;
+  clientId: number | null;
+  mechanicId: number | null;
+  mechanicName: string;
+  spot: string;
+};
+
+/** Source rows for /jobs/bulk-edit (one client at a time). */
+export async function getJobsForClient(
+  clientId: number,
+): Promise<BulkEditableJob[]> {
+  const supabase = await createClient();
+  const rows = unwrap(
+    await supabase
+      .from("transaction_list")
+      .select(
+        "id, job_id, item, fault, remark, client_name, mechanic_id, uniq_id",
+      )
+      .eq("del_status", 0)
+      .eq("client_name", String(clientId))
+      .order("job_id", { ascending: false })
+      .limit(500),
+    "jobs.bulkEditRows",
+  );
+  const mechanics = await getMechanicNames(
+    rows
+      .map((row) => row.mechanic_id)
+      .filter((id): id is number => id !== null),
+  );
+  return rows.map((row) => ({
+    id: row.id,
+    jobId: row.job_id,
+    item: row.item,
+    fault: row.fault,
+    remark: row.remark,
+    clientId: parseLegacyClientId(row.client_name),
+    mechanicId: row.mechanic_id,
+    mechanicName: mechanics.get(row.mechanic_id ?? -1) ?? "—",
+    spot: row.uniq_id ?? "",
+  }));
+}
+
+export type InvoiceJob = {
+  id: number;
+  jobId: string | null;
+  clientId: number | null;
+  code: string | null;
+  item: string;
+  fault: string;
+  amount: number;
+  status: number;
+  dateCreated: string;
+};
+
+/**
+ * Jobs eligible for a combined client invoice. `ids` powers the v1-style
+ * "Estimate" action on selected rows; otherwise all jobs for one client load.
+ */
+export async function getJobsForInvoice(
+  clientId: number | null,
+  ids: number[] = [],
+): Promise<InvoiceJob[]> {
+  const supabase = await createClient();
+  let query = supabase
+    .from("transaction_list")
+    .select(
+      "id, job_id, client_name, code, item, fault, amount, status, date_created",
+    )
+    .eq("del_status", 0)
+    .order("job_id", { ascending: false })
+    .limit(500);
+  if (ids.length) {
+    query = query.in("id", ids.slice(0, 200));
+  } else if (clientId) {
+    query = query.eq("client_name", String(clientId));
+  }
+  const rows = unwrap(await query, "jobs.invoiceRows");
+  return rows.map((row) => ({
+    id: row.id,
+    jobId: row.job_id,
+    clientId: parseLegacyClientId(row.client_name),
+    code: row.code,
+    item: row.item,
+    fault: row.fault,
+    amount: row.amount,
+    status: row.status,
+    dateCreated: row.date_created,
+  }));
 }
 
 export async function uploadJobImages(files: File[]) {

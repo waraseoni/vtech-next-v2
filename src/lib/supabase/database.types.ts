@@ -171,6 +171,25 @@ export type Database = {
         is_active: boolean;
       }>;
 
+      job_required_parts: Table<{
+        id: number;
+        transaction_id: number;
+        product_id: number | null;
+        product_name: string;
+        qty_needed: number;
+        qty_received: number;
+        status: number;
+        supplier_id: number | null;
+        source_name: string | null;
+        phone: string | null;
+        eta: string | null;
+        photo_url: string | null;
+        remark: string | null;
+        created_by: number | null;
+        date_created: string;
+        date_updated: string;
+      }>;
+
       product_list: Table<{
         id: number;
         name: string;
@@ -394,6 +413,33 @@ export type Database = {
       };
       next_job_id: { Args: Record<PropertyKey, never>; Returns: number };
       peek_next_job_id: { Args: Record<PropertyKey, never>; Returns: number };
+      get_jobs_stats: {
+        Args: {
+          p_term?: string | null;
+          p_date_from?: string | null;
+          p_date_to?: string | null;
+          p_hide_delivered?: boolean | null;
+          p_status?: number | null;
+          p_spot?: string | null;
+        };
+        Returns: {
+          total: number;
+          pending: number;
+          progress: number;
+          completed: number;
+          totalAmt: number;
+        };
+      };
+      get_stale_jobs: {
+        Args: { p_days?: number | null; p_limit?: number | null };
+        Returns: Array<{
+          id: number;
+          job_id: string | null;
+          item: string;
+          uniq_id: string;
+          days: number;
+        }>;
+      };
       get_my_role: { Args: Record<PropertyKey, never>; Returns: string | null };
       get_my_client_id: {
         Args: Record<PropertyKey, never>;

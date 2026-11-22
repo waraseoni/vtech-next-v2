@@ -82,6 +82,13 @@ export const jobInputSchema = z.object({
   remark: z.string().trim().max(400, "Remark bahut lamba hai.").optional(),
   spot: z.string().trim().max(120, "Spot bahut lamba hai.").optional(),
   locationId: optionalId,
+  /** Backdated/old entries: caller-supplied numeric job id. */
+  manualJobId: z
+    .string()
+    .trim()
+    .max(20)
+    .regex(/^\d*$/, "Job id sirf number ho sakta hai.")
+    .optional(),
   commissionAmount: z.coerce
     .number()
     .min(0, "Commission negative nahi ho sakta.")
@@ -114,6 +121,7 @@ export function jobInputFromForm(formData: FormData) {
     remark: formData.get("remark") ?? "",
     spot: formData.get("spot") ?? "",
     locationId: formData.get("location_id") ?? "",
+    manualJobId: formData.get("manual_job_id") ?? "",
     commissionAmount: formData.get("commission_amount") || 0,
     services: formData.get("services") ?? "[]",
     products: formData.get("products") ?? "[]",

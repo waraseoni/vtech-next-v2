@@ -1,6 +1,8 @@
 import {
   ArrowLeft,
+  ArrowRight,
   CalendarClock,
+  History,
   MapPin,
   Pencil,
   User,
@@ -9,11 +11,15 @@ import {
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
+import { AddPaymentDialog } from "@/components/jobs/add-payment-dialog";
 import { DeleteJobButton } from "@/components/jobs/delete-job-button";
 import { JobImages } from "@/components/jobs/job-images";
+import { JobSpotField } from "@/components/jobs/job-spot-field";
 import { JobStatusActions } from "@/components/jobs/job-status-actions";
 import { JobStatusBadge } from "@/components/jobs/job-status-badge";
+import { JobWhatsAppButton } from "@/components/jobs/job-whatsapp-button";
 import { PrintJobButton } from "@/components/jobs/print-job-button";
+import { RequiredPartsPanel } from "@/components/jobs/required-parts-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -24,6 +30,13 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { isStaffRole, requireSession } from "@/lib/auth";
+import {
+  getJobActivity,
+  getJobNeighbors,
+  getJobSpots,
+  getRequiredParts,
+  getClientContact,
+} from "@/lib/data/job-operations";
 import { getJobDetail } from "@/lib/data/jobs";
 import { resolveMediaUrl } from "@/lib/data/storage";
 import { formatIST } from "@/lib/date";
@@ -58,6 +71,13 @@ export default async function JobDetailPage({
   if (!detail) notFound();
 
   const { job, services, products, images } = detail;
+  const [clientContact, neighbors, activity, parts, spots] = await Promise.all([
+    job.clientId ? getClientContact(job.clientId) : Promise.resolve(""),
+    getJobNeighbors(job.job_id ?? ""),
+    getJobActivity(job.id, job.job_id),
+    getRequiredParts(job.id),
+    getJobSpots(),
+  ]);
   const supabaseUrl = getPublicEnv().url;
   const imageUrls = images
     .map((image) => ({
@@ -70,6 +90,8 @@ export default async function JobDetailPage({
     products.map((line) => lineTotal(line.qty, line.price)),
   );
   const canDelete = canDeleteRecords(session.profile.role);
+  const canWrite = isStaffRole(session.profile.role);
+  const closed = job.status === 4 || job.status === 5;
 
   const steps = [
     { status: 0, label: "Created", date: job.date_created },
@@ -100,8 +122,42 @@ export default async function JobDetailPage({
           <p className="text-muted-foreground mt-1 text-sm">
             {job.item} · {fmtDateTime(job.date_created)}
           </p>
+          <div className="mt-2 flex items-center gap-2 print:hidden">
+            {neighbors.previous ? (
+              <Button asChild variant="ghost" size="sm" className="-ml-2">
+                <Link href={`/jobs/${neighbors.previous.id}`}>
+                  <ArrowLeft className="size-3.5" aria-hidden />
+                  Prev · {neighbors.previous.label}
+                </Link>
+              </Button>
+            ) : null}
+            {neighbors.next ? (
+              <Button asChild variant="ghost" size="sm">
+                <Link href={`/jobs/${neighbors.next.id}`}>
+                  Next · {neighbors.next.label}
+                  <ArrowRight className="size-3.5" aria-hidden />
+                </Link>
+              </Button>
+            ) : null}
+          </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <JobWhatsAppButton
+            jobId={job.job_id}
+            item={job.item}
+            status={job.status}
+            amount={job.amount}
+            clientName={job.clientName}
+            phone={clientContact}
+          />
+          {canWrite ? (
+            <AddPaymentDialog
+              jobId={job.id}
+              clientName={job.clientName}
+              billAmount={job.amount}
+              hasClient={Boolean(job.clientId)}
+            />
+          ) : null}
           <PrintJobButton />
           <Button asChild variant="outline" size="sm">
             <Link href={`/jobs/${job.id}/edit`}>
@@ -155,18 +211,29 @@ export default async function JobDetailPage({
                   </p>
                 </div>
               ) : null}
-              {job.uniq_id ? (
-                <div>
-                  <p className="text-muted-foreground text-xs">Spot</p>
-                  <p className="mt-1 flex items-center gap-1.5 text-sm">
-                    <MapPin
-                      className="text-muted-foreground size-3.5"
-                      aria-hidden
-                    />
-                    {job.uniq_id}
+              <div className="sm:col-span-2">
+                <p className="text-muted-foreground mb-1 flex items-center gap-1.5 text-xs">
+                  <MapPin className="size-3.5" aria-hidden />
+                  Spot / location
+                </p>
+                {canWrite && !closed ? (
+                  <JobSpotField
+                    spots={spots}
+                    initialLocationId={job.location_id}
+                    initialSpot={job.uniq_id ?? ""}
+                    jobId={job.id}
+                  />
+                ) : (
+                  <p className="mt-1 text-sm">
+                    {job.uniq_id || "—"}{" "}
+                    {closed ? (
+                      <Badge variant="outline" className="ml-1">
+                        {job.status === 5 ? "Delivered" : "Cancelled"}
+                      </Badge>
+                    ) : null}
                   </p>
-                </div>
-              ) : null}
+                )}
+              </div>
               <div>
                 <p className="text-muted-foreground text-xs">Commission</p>
                 <p className="mt-1 text-sm tabular-nums">
@@ -299,6 +366,22 @@ export default async function JobDetailPage({
 
           <Card className="gap-4 py-5 print:hidden">
             <CardHeader className="px-5">
+              <CardTitle>Required Saman</CardTitle>
+              <CardDescription>
+                Repair ke liye chahiye wale spare parts aur unki availability.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="px-5">
+              <RequiredPartsPanel
+                jobId={job.id}
+                closed={closed || !canWrite}
+                parts={parts}
+              />
+            </CardContent>
+          </Card>
+
+          <Card className="gap-4 py-5 print:hidden">
+            <CardHeader className="px-5">
               <CardTitle>Photos</CardTitle>
               <CardDescription>
                 Job images public media bucket me store hoti hain.
@@ -306,6 +389,44 @@ export default async function JobDetailPage({
             </CardHeader>
             <CardContent className="px-5">
               <JobImages jobId={job.id} images={imageUrls} />
+            </CardContent>
+          </Card>
+
+          <Card className="gap-4 py-5 print:hidden">
+            <CardHeader className="px-5">
+              <CardTitle>Activity</CardTitle>
+              <CardDescription>
+                Job par hue changes ka history (audit log).
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="px-5">
+              {activity.length === 0 ? (
+                <p className="text-muted-foreground text-sm">
+                  Koi activity log nahi mila.
+                </p>
+              ) : (
+                <ol className="space-y-3">
+                  {activity.slice(0, 30).map((entry) => (
+                    <li key={entry.id} className="flex items-start gap-2.5">
+                      <History
+                        className="text-muted-foreground mt-0.5 size-3.5 shrink-0"
+                        aria-hidden
+                      />
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium">{entry.label}</p>
+                        {entry.details ? (
+                          <p className="text-muted-foreground text-xs">
+                            {entry.details}
+                          </p>
+                        ) : null}
+                        <p className="text-muted-foreground text-xs">
+                          {fmtDateTime(entry.date)} · {entry.module}
+                        </p>
+                      </div>
+                    </li>
+                  ))}
+                </ol>
+              )}
             </CardContent>
           </Card>
         </div>
